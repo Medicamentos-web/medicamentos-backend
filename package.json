@@ -1,0 +1,23 @@
+{
+  "name": "medicamentos-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend de Gestión de Medicamentos Multifamiliar",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "nodemailer": "^6.10.1",
+    "pdf-parse": "^1.1.4",
+    "pdfkit": "^0.17.2",
+    "pg": "^8.13.1",
+    "web-push": "^3.6.7"
+  }
+}
