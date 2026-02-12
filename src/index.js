@@ -48,18 +48,31 @@ const TOKEN_NAME = "medicamentos_token";
 const DEV_SHOW_RESET_TOKEN = process.env.DEV_SHOW_RESET_TOKEN === "true";
 
 // Soporta DATABASE_URL (Supabase/Render/producción) o variables individuales (Docker local)
-const pool = process.env.DATABASE_URL
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false },
-    })
-  : new Pool({
-      host: process.env.DB_HOST || "localhost",
-      port: Number(process.env.DB_PORT || 5432),
-      user: process.env.DB_USER || "medicamentos",
-      password: process.env.DB_PASSWORD || "medicamentos_secret",
-      database: process.env.DB_NAME || "medicamentos",
-    });
+// Conexión a PostgreSQL: soporta variables individuales (recomendado) o DATABASE_URL
+const poolConfig = {
+  host: process.env.DB_HOST || "localhost",
+  port: Number(process.env.DB_PORT || 5432),
+  user: process.env.DB_USER || "medicamentos",
+  password: process.env.DB_PASSWORD || "medicamentos_secret",
+  database: process.env.DB_NAME || "medicamentos",
+};
+
+// Si hay variables individuales de Supabase, usarlas; sino fallback a DATABASE_URL
+if (process.env.DB_HOST && process.env.DB_HOST.includes("supabase")) {
+  poolConfig.ssl = { rejectUnauthorized: false };
+} else if (process.env.DATABASE_URL) {
+  // Fallback a connection string
+  poolConfig.connectionString = process.env.DATABASE_URL;
+  poolConfig.ssl = process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false };
+  delete poolConfig.host;
+  delete poolConfig.port;
+  delete poolConfig.user;
+  delete poolConfig.password;
+  delete poolConfig.database;
+}
+
+const pool = new Pool(poolConfig);
+console.log("[DB] Conectando a:", poolConfig.host || "(connection string)");
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
