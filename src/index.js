@@ -76,6 +76,7 @@ if (process.env.DATABASE_URL) {
 poolConfig.connectionTimeoutMillis = 10000;  // 10s para conectar
 poolConfig.idleTimeoutMillis = 30000;        // 30s idle
 poolConfig.max = 10;                         // máx 10 conexiones
+poolConfig.application_name = "medicamentos-backend";
 
 const pool = new Pool(poolConfig);
 
