@@ -74,6 +74,16 @@ if (process.env.DB_HOST && process.env.DB_HOST.includes("supabase")) {
 const pool = new Pool(poolConfig);
 console.log("[DB] Conectando a:", poolConfig.host || "(connection string)");
 
+// Evitar crash por errores de pool no manejados
+pool.on("error", (err) => {
+  console.error("[DB] Error inesperado en el pool:", err.message);
+});
+
+// Verificar conexión al iniciar
+pool.query("SELECT 1")
+  .then(() => console.log("[DB] Conexión verificada OK"))
+  .catch((err) => console.error("[DB] No se pudo conectar:", err.message));
+
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
@@ -5280,6 +5290,26 @@ app.post("/admin/meds-reset-all", requireRoleHtml(["admin", "superuser"]), async
   res.redirect(`/admin/meds-list?reset=1&deleted=${deletedCount}`);
 });
 
+// Global error handler: evita que Express devuelva 500 genérico
+app.use((err, _req, res, _next) => {
+  console.error("[ERROR GLOBAL]", err.message || err);
+  res.status(500).send(`
+    <html><body style="font-family:sans-serif;padding:40px;text-center">
+      <h2>Error temporal del servidor</h2>
+      <p>Recarga la página en unos segundos.</p>
+      <a href="/admin/login">Volver al login</a>
+    </body></html>
+  `);
+});
+
+// Evitar crash por promesas no manejadas
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED REJECTION]", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION]", err.message);
+});
+
 const port = Number(process.env.PORT || 4000);
 app.listen(port, "0.0.0.0", () => {
   console.log(`Backend escuchando en puerto ${port}`);
@@ -5288,5 +5318,5 @@ app.listen(port, "0.0.0.0", () => {
 // Job automático de alertas: cada 4 horas
 // Stock bajo: se genera 1x/día | Dosis pendientes: cada 4h | Pasadas: auto-borradas
 setInterval(runAlertsJob, 4 * 60 * 60 * 1000);
-// Ejecutar al arrancar para limpiar alertas viejas inmediatamente
-runAlertsJob();
+// Ejecutar al arrancar con delay para dar tiempo a la DB
+setTimeout(runAlertsJob, 10000);
