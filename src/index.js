@@ -47,32 +47,32 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change";
 const TOKEN_NAME = "medicamentos_token";
 const DEV_SHOW_RESET_TOKEN = process.env.DEV_SHOW_RESET_TOKEN === "true";
 
-// Soporta DATABASE_URL (Supabase/Render/producción) o variables individuales (Docker local)
-// Conexión a PostgreSQL: soporta variables individuales (recomendado) o DATABASE_URL
-const poolConfig = {
-  host: process.env.DB_HOST || "localhost",
-  port: Number(process.env.DB_PORT || 5432),
-  user: process.env.DB_USER || "medicamentos",
-  password: process.env.DB_PASSWORD || "medicamentos_secret",
-  database: process.env.DB_NAME || "medicamentos",
-};
+// Conexión a PostgreSQL: prioriza DATABASE_URL (Render/producción), fallback a vars individuales
+const poolConfig = {};
 
-// Si hay variables individuales de Supabase, usarlas; sino fallback a DATABASE_URL
-if (process.env.DB_HOST && process.env.DB_HOST.includes("supabase")) {
-  poolConfig.ssl = { rejectUnauthorized: false };
-} else if (process.env.DATABASE_URL) {
-  // Fallback a connection string
+if (process.env.DATABASE_URL) {
   poolConfig.connectionString = process.env.DATABASE_URL;
+  // Render PostgreSQL y Supabase requieren SSL
   poolConfig.ssl = process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false };
-  delete poolConfig.host;
-  delete poolConfig.port;
-  delete poolConfig.user;
-  delete poolConfig.password;
-  delete poolConfig.database;
+  console.log("[DB] Usando DATABASE_URL");
+} else {
+  poolConfig.host = process.env.DB_HOST || "localhost";
+  poolConfig.port = Number(process.env.DB_PORT || 5432);
+  poolConfig.user = process.env.DB_USER || "medicamentos";
+  poolConfig.password = process.env.DB_PASSWORD || "medicamentos_secret";
+  poolConfig.database = process.env.DB_NAME || "medicamentos";
+  if (process.env.DB_HOST && !process.env.DB_HOST.includes("localhost")) {
+    poolConfig.ssl = { rejectUnauthorized: false };
+  }
+  console.log("[DB] Usando variables individuales, host:", poolConfig.host);
 }
 
+// Timeouts para evitar queries colgadas
+poolConfig.connectionTimeoutMillis = 10000;  // 10s para conectar
+poolConfig.idleTimeoutMillis = 30000;        // 30s idle
+poolConfig.max = 10;                         // máx 10 conexiones
+
 const pool = new Pool(poolConfig);
-console.log("[DB] Conectando a:", poolConfig.host || "(connection string)");
 
 // Evitar crash por errores de pool no manejados
 pool.on("error", (err) => {
@@ -80,9 +80,9 @@ pool.on("error", (err) => {
 });
 
 // Verificar conexión al iniciar
-pool.query("SELECT 1")
-  .then(() => console.log("[DB] Conexión verificada OK"))
-  .catch((err) => console.error("[DB] No se pudo conectar:", err.message));
+pool.query("SELECT NOW()")
+  .then((r) => console.log("[DB] Conexión OK, hora del servidor:", r.rows[0].now))
+  .catch((err) => console.error("[DB] ERROR al conectar:", err.message));
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
@@ -1329,10 +1329,11 @@ function resolveFamilyScope(req) {
 
 app.get("/health", async (_req, res) => {
   try {
-    await pool.query("SELECT 1 AS ok");
-    res.json({ ok: true });
+    const r = await pool.query("SELECT NOW() AS time, current_database() AS db");
+    res.json({ ok: true, db: r.rows[0].db, time: r.rows[0].time });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
+    console.error("[HEALTH] DB error:", error.message);
+    res.status(500).json({ ok: false, error: error.message, hint: "Database connection failed" });
   }
 });
 
@@ -1640,12 +1641,14 @@ app.post("/admin/login", async (req, res) => {
   }
 
   try {
+    console.log("[AUTH] Intentando login admin:", email, "family:", family_id);
     const result = await pool.query(
       `SELECT id, family_id, name, email, role, password_hash
        FROM users
        WHERE family_id = $1 AND email = $2`,
       [Number(family_id), email]
     );
+    console.log("[AUTH] Query OK, rows:", result.rows.length);
     if (result.rows.length === 0) {
       return res.redirect("/admin/login?error=1");
     }
@@ -1658,8 +1661,10 @@ app.post("/admin/login", async (req, res) => {
 
     const token = signToken(user);
     res.cookie(TOKEN_NAME, token, cookieOpts(req));
+    console.log("[AUTH] Login exitoso:", email);
     res.redirect("/dashboard");
   } catch (error) {
+    console.error("[AUTH] Error en login:", error.message);
     res.redirect("/admin/login?error=1");
   }
 });
