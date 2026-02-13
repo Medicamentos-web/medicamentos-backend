@@ -1683,12 +1683,38 @@ app.post("/admin/login", async (req, res) => {
     }
 
     const token = signToken(user);
-    res.cookie(TOKEN_NAME, token, cookieOpts(req));
-    console.log("[AUTH] Login exitoso:", email);
-    res.redirect("/dashboard");
+    const opts = cookieOpts(req);
+    console.log("[AUTH] Cookie opts:", JSON.stringify(opts));
+    res.cookie(TOKEN_NAME, token, opts);
+    console.log("[AUTH] Login exitoso:", email, "role:", user.role);
+    // Página intermedia para verificar que el login funciona
+    res.send(`
+      <!doctype html>
+      <html><head><meta charset="utf-8"><title>Login OK</title>
+      <style>body{font-family:sans-serif;padding:40px;text-align:center;}</style>
+      </head><body>
+        <h2 style="color:#059669;">Login exitoso</h2>
+        <p>Usuario: <strong>${escapeHtml(user.email)}</strong></p>
+        <p>Rol: <strong>${escapeHtml(user.role)}</strong></p>
+        <p>Family: <strong>${user.family_id}</strong></p>
+        <p style="margin-top:20px;">
+          <a href="/dashboard" style="background:#2563EB;color:white;padding:12px 24px;border-radius:12px;text-decoration:none;font-weight:bold;">Ir al Dashboard</a>
+        </p>
+        <p style="margin-top:12px;font-size:12px;color:#64748b;">Si esta página carga, el login funciona. El error está en el dashboard.</p>
+      </body></html>
+    `);
   } catch (error) {
-    console.error("[AUTH] Error en login:", error.message);
-    res.redirect("/admin/login?error=1");
+    console.error("[AUTH] Error en login:", error.message, error.stack);
+    res.send(`
+      <!doctype html>
+      <html><head><meta charset="utf-8"><title>Login Error</title>
+      <style>body{font-family:sans-serif;padding:40px;}</style>
+      </head><body>
+        <h2 style="color:#DC2626;">Error en login</h2>
+        <pre style="background:#f1f5f9;padding:16px;border-radius:12px;overflow:auto;">${escapeHtml(error.message)}\n${escapeHtml(error.stack)}</pre>
+        <a href="/admin/login">Volver</a>
+      </body></html>
+    `);
   }
 });
 
