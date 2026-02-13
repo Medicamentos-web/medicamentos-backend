@@ -1337,6 +1337,24 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+// Diagnóstico: muestra info del servidor sin consultar DB
+app.get("/diag", (req, res) => {
+  res.json({
+    ok: true,
+    node: process.version,
+    uptime: Math.round(process.uptime()) + "s",
+    memory: Math.round(process.memoryUsage().rss / 1024 / 1024) + "MB",
+    env: {
+      NODE_ENV: process.env.NODE_ENV || "dev",
+      HAS_DATABASE_URL: !!process.env.DATABASE_URL,
+      HAS_JWT_SECRET: !!process.env.JWT_SECRET,
+      PORT: process.env.PORT || "4000",
+    },
+    cookies: req.cookies ? Object.keys(req.cookies) : [],
+    hasUser: !!req.user,
+  });
+});
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -1611,27 +1629,32 @@ async function sendWelcomeEmail(email, tempPassword) {
 // HTML DASHBOARD (backend)
 // =============================================================================
 app.get("/admin/login", (_req, res) => {
-  const errorMessage = _req.query?.error
-    ? "Credenciales inválidas. Intenta nuevamente."
-    : "";
-  const fieldClass = 'class="form-control"';
-  const content = `
-    <div class="card" style="max-width:420px; margin:0 auto;">
-      <h1>Acceso administrador</h1>
-      <p class="muted" style="font-size:12px;">Inicia sesión para ver el dashboard del backend.</p>
-      ${errorMessage ? `<div style="margin-top:12px; font-size:13px; color:#b91c1c;">${errorMessage}</div>` : ""}
-      <form method="POST" action="/admin/login">
-        <label>Family ID</label>
-        <input name="family_id" placeholder="1" required ${fieldClass} />
-        <label>Email</label>
-        <input name="email" type="email" placeholder="admin@mail.com" required ${fieldClass} />
-        <label>Password</label>
-        <input name="password" type="password" placeholder="******" required ${fieldClass} />
-        <button class="btn primary" type="submit" style="width:100%; margin-top:18px;">Entrar</button>
-      </form>
-    </div>
-  `;
-  res.send(renderShell(_req, "Acceso Admin", "", content));
+  try {
+    const errorMessage = _req.query?.error
+      ? "Credenciales inválidas. Intenta nuevamente."
+      : "";
+    const fieldClass = 'class="form-control"';
+    const content = `
+      <div class="card" style="max-width:420px; margin:0 auto;">
+        <h1>Acceso administrador</h1>
+        <p class="muted" style="font-size:12px;">Inicia sesión para ver el dashboard del backend.</p>
+        ${errorMessage ? `<div style="margin-top:12px; font-size:13px; color:#b91c1c;">${errorMessage}</div>` : ""}
+        <form method="POST" action="/admin/login">
+          <label>Family ID</label>
+          <input name="family_id" placeholder="1" required ${fieldClass} />
+          <label>Email</label>
+          <input name="email" type="email" placeholder="admin@mail.com" required ${fieldClass} />
+          <label>Password</label>
+          <input name="password" type="password" placeholder="******" required ${fieldClass} />
+          <button class="btn primary" type="submit" style="width:100%; margin-top:18px;">Entrar</button>
+        </form>
+      </div>
+    `;
+    res.send(renderShell(_req, "Acceso Admin", "", content));
+  } catch (error) {
+    console.error("[ADMIN LOGIN GET] Error:", error.message, error.stack);
+    res.status(500).send(`<html><body><h2>Error en login page</h2><pre>${error.message}\n${error.stack}</pre><a href="/diag">Ver diagnóstico</a></body></html>`);
+  }
 });
 
 app.post("/admin/login", async (req, res) => {
