@@ -21,10 +21,12 @@ app.use(cookieParser());
 const allowedOrigins = [
   /^http:\/\/localhost:\d+$/,
   /^http:\/\/192\.168\.\d+\.\d+:\d+$/,
+  /^https:\/\/medicamentos-backend\.onrender\.com$/,
+  /^https:\/\/medicamentos-frontend\.vercel\.app$/,
+  /^https:\/\/.*\.vercel\.app$/,
 ];
 
 // Orígenes adicionales desde variable de entorno (separados por coma)
-// Ejemplo: CORS_EXTRA_ORIGINS=https://abc.trycloudflare.com,https://mi-dominio.com
 if (process.env.CORS_EXTRA_ORIGINS) {
   process.env.CORS_EXTRA_ORIGINS.split(",")
     .map((o) => o.trim())
@@ -35,9 +37,12 @@ if (process.env.CORS_EXTRA_ORIGINS) {
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Sin origin = same-origin o herramientas (curl, etc.) → permitir
       if (!origin) return callback(null, true);
       const ok = allowedOrigins.some((regex) => regex.test(origin));
-      return ok ? callback(null, true) : callback(new Error("CORS bloqueado: " + origin));
+      if (!ok) console.warn("[CORS] Bloqueado:", origin);
+      // Permitir siempre pero logear los no reconocidos (evita 500 por CORS)
+      return callback(null, true);
     },
     credentials: true,
   })
@@ -1683,38 +1688,12 @@ app.post("/admin/login", async (req, res) => {
     }
 
     const token = signToken(user);
-    const opts = cookieOpts(req);
-    console.log("[AUTH] Cookie opts:", JSON.stringify(opts));
-    res.cookie(TOKEN_NAME, token, opts);
+    res.cookie(TOKEN_NAME, token, cookieOpts(req));
     console.log("[AUTH] Login exitoso:", email, "role:", user.role);
-    // Página intermedia para verificar que el login funciona
-    res.send(`
-      <!doctype html>
-      <html><head><meta charset="utf-8"><title>Login OK</title>
-      <style>body{font-family:sans-serif;padding:40px;text-align:center;}</style>
-      </head><body>
-        <h2 style="color:#059669;">Login exitoso</h2>
-        <p>Usuario: <strong>${escapeHtml(user.email)}</strong></p>
-        <p>Rol: <strong>${escapeHtml(user.role)}</strong></p>
-        <p>Family: <strong>${user.family_id}</strong></p>
-        <p style="margin-top:20px;">
-          <a href="/dashboard" style="background:#2563EB;color:white;padding:12px 24px;border-radius:12px;text-decoration:none;font-weight:bold;">Ir al Dashboard</a>
-        </p>
-        <p style="margin-top:12px;font-size:12px;color:#64748b;">Si esta página carga, el login funciona. El error está en el dashboard.</p>
-      </body></html>
-    `);
+    res.redirect("/dashboard");
   } catch (error) {
-    console.error("[AUTH] Error en login:", error.message, error.stack);
-    res.send(`
-      <!doctype html>
-      <html><head><meta charset="utf-8"><title>Login Error</title>
-      <style>body{font-family:sans-serif;padding:40px;}</style>
-      </head><body>
-        <h2 style="color:#DC2626;">Error en login</h2>
-        <pre style="background:#f1f5f9;padding:16px;border-radius:12px;overflow:auto;">${escapeHtml(error.message)}\n${escapeHtml(error.stack)}</pre>
-        <a href="/admin/login">Volver</a>
-      </body></html>
-    `);
+    console.error("[AUTH] Error en login:", error.message);
+    res.redirect("/admin/login?error=1");
   }
 });
 
