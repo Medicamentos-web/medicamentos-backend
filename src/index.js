@@ -1680,7 +1680,9 @@ app.get("/admin/logout", (req, res) => {
 });
 
 app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
   const familyId = req.user.family_id;
+  console.log("[DASHBOARD] Cargando para family:", familyId, "user:", req.user.sub);
   const usersList = await pool.query(
     `SELECT id, name, email FROM users WHERE family_id = $1 ORDER BY name ASC`,
     [familyId]
@@ -1689,6 +1691,7 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
   const safeUserId = Number.isFinite(selectedUserId)
     ? selectedUserId
     : usersList.rows[0]?.id;
+  console.log("[DASHBOARD] safeUserId:", safeUserId);
   const [
     usersCount,
     medsCount,
@@ -1749,6 +1752,7 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
         [familyId, safeUserId]
       ),
     ]);
+  console.log("[DASHBOARD] Queries OK");
 
   const content = `
     <style>
@@ -1917,6 +1921,21 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
   `;
   res.send(renderShell(req, "Panel de control", "panel", content));
 
+  } catch (error) {
+    console.error("[DASHBOARD] Error:", error.message);
+    const content = `
+      <div class="card" style="max-width:640px; margin:0 auto;">
+        <h1>Error al cargar el dashboard</h1>
+        <p style="color:#b91c1c; margin-top:12px;">${escapeHtml(error.message)}</p>
+        <p style="color:var(--muted); margin-top:8px; font-size:13px;">Esto puede ocurrir si la base de datos está reconectándose. Intenta recargar la página.</p>
+        <div style="margin-top:16px; display:flex; gap:10px;">
+          <a class="btn primary" href="/dashboard">Reintentar</a>
+          <a class="btn outline" href="/admin/logout">Cerrar sesión</a>
+        </div>
+      </div>
+    `;
+    res.send(renderShell(req, "Error", "panel", content));
+  }
 });
 
 // =============================================================================
