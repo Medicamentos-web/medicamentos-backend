@@ -4062,6 +4062,81 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
 });
 
 // =============================================================================
+// USER FEEDBACK (Bewertung)
+// =============================================================================
+app.post("/api/feedback", requireAuth, async (req, res) => {
+  const { user_id, family_id, rating, comment, lang: userLang } = req.body || {};
+  const userId = Number(user_id || req.user.sub);
+  const familyId = Number(family_id || getFamilyId(req));
+  const stars = Math.min(5, Math.max(1, Number(rating) || 0));
+
+  try {
+    const userResult = await pool.query(
+      `SELECT name, email FROM users WHERE id = $1 AND family_id = $2`,
+      [userId, familyId]
+    );
+    const u = userResult.rows[0];
+    if (!u) return res.status(404).json({ error: "Usuario no encontrado" });
+
+    const starsDisplay = "⭐".repeat(stars) + "☆".repeat(5 - stars);
+    const ts = new Date().toLocaleString("es-ES", { timeZone: "Europe/Zurich" });
+
+    const feedbackHtml = `
+      <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+        <h2 style="color:#0f172a;">Nueva valoración de usuario</h2>
+        <div style="background:#fffbeb; border:1px solid #fbbf24; border-radius:12px; padding:16px; margin:16px 0; text-align:center;">
+          <p style="font-size:32px; margin:0;">${starsDisplay}</p>
+          <p style="font-size:18px; font-weight:bold; color:#92400e; margin-top:8px;">${stars} / 5</p>
+        </div>
+        ${comment ? `
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:16px; margin:16px 0;">
+          <p style="font-size:13px; color:#334155; font-style:italic;">"${comment.replace(/</g, "&lt;").replace(/>/g, "&gt;")}"</p>
+        </div>` : ""}
+        <table style="width:100%; font-size:13px; color:#475569; border-collapse:collapse;">
+          <tr><td style="padding:4px 0; font-weight:bold;">Usuario:</td><td>${u.name || "N/A"}</td></tr>
+          <tr><td style="padding:4px 0; font-weight:bold;">Email:</td><td>${u.email}</td></tr>
+          <tr><td style="padding:4px 0; font-weight:bold;">Familia ID:</td><td>${familyId}</td></tr>
+          <tr><td style="padding:4px 0; font-weight:bold;">Idioma:</td><td>${userLang || "es"}</td></tr>
+          <tr><td style="padding:4px 0; font-weight:bold;">Fecha:</td><td>${ts}</td></tr>
+          <tr><td style="padding:4px 0; font-weight:bold;">User-Agent:</td><td style="word-break:break-all; font-size:11px;">${req.headers["user-agent"] || "N/A"}</td></tr>
+        </table>
+      </div>
+    `;
+
+    // Send to admin
+    if (mailTransport && ADMIN_EMAIL) {
+      try {
+        await sendAdminAlertEmail(`Feedback ${starsDisplay} – ${u.name || u.email}`, feedbackHtml);
+      } catch (e) { console.error("[FEEDBACK] Error email admin:", e.message); }
+    }
+
+    // Send confirmation to user
+    const userConfirmHtml = `
+      <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+        <h2 style="color:#0f172a;">Gracias por tu valoración</h2>
+        <p style="font-size:14px; color:#475569;">Hemos recibido tu feedback:</p>
+        <div style="background:#fffbeb; border:1px solid #fbbf24; border-radius:12px; padding:16px; margin:16px 0; text-align:center;">
+          <p style="font-size:32px; margin:0;">${starsDisplay}</p>
+        </div>
+        ${comment ? `<p style="font-size:13px; color:#334155; font-style:italic; background:#f8fafc; padding:12px; border-radius:8px;">"${comment.replace(/</g, "&lt;").replace(/>/g, "&gt;")}"</p>` : ""}
+        <p style="font-size:12px; color:#94a3b8; margin-top:16px;">Tu opinión nos ayuda a mejorar. ¡Gracias!</p>
+      </div>
+    `;
+    if (mailTransport && u.email) {
+      try {
+        await sendUserEmail(u.email, "Gracias por tu valoración – Medicamentos", userConfirmHtml);
+      } catch (e) { console.error("[FEEDBACK] Error email user:", e.message); }
+    }
+
+    console.log(`[FEEDBACK] ${stars}/5 de user ${userId} (${u.email}): ${comment || "(sin comentario)"}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[FEEDBACK] Error:", err.message);
+    res.status(500).json({ error: "Error al enviar feedback" });
+  }
+});
+
+// =============================================================================
 // DISCLAIMER ACCEPTANCE (legal)
 // =============================================================================
 app.post("/api/disclaimer-accepted", requireAuth, async (req, res) => {
