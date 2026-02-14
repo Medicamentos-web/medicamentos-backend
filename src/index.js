@@ -13,8 +13,101 @@ const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const { Pool } = require("pg");
+const Stripe = require("stripe");
 
 const app = express();
+
+// ── Stripe config ──
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || "";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+
+// Stripe webhook necesita raw body - ANTES de express.json()
+app.post("/api/billing/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!stripe || !STRIPE_WEBHOOK_SECRET) {
+    return res.status(400).json({ error: "Stripe no configurado" });
+  }
+  let event;
+  try {
+    const sig = req.headers["stripe-signature"];
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error("[STRIPE WEBHOOK] Firma inválida:", err.message);
+    return res.status(400).json({ error: "Firma inválida" });
+  }
+
+  console.log(`[STRIPE WEBHOOK] Evento: ${event.type}`);
+
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
+        const familyId = Number(session.metadata?.family_id);
+        if (!familyId) break;
+        await pool.query(
+          `UPDATE families SET
+            stripe_customer_id = $1,
+            stripe_subscription_id = $2,
+            subscription_status = 'active',
+            subscription_start = NOW(),
+            subscription_end = NULL
+           WHERE id = $3`,
+          [session.customer, session.subscription, familyId]
+        );
+        console.log(`[STRIPE] Familia ${familyId} activada`);
+        // Email confirmación
+        const fam = await pool.query(`SELECT f.name, u.email FROM families f JOIN users u ON u.family_id = f.id WHERE f.id = $1 AND u.role IN ('admin','superuser') LIMIT 1`, [familyId]);
+        if (fam.rows[0]?.email && mailTransport) {
+          try {
+            await mailTransport.sendMail({
+              from: process.env.SMTP_USER, to: fam.rows[0].email,
+              subject: "Suscripción activada - Medicamentos",
+              html: `<h2>Su suscripción ha sido activada</h2><p>Familia: ${fam.rows[0].name || familyId}</p><p>Todas las funciones están ahora disponibles.</p>`,
+            });
+          } catch {}
+        }
+        break;
+      }
+      case "customer.subscription.updated": {
+        const sub = event.data.object;
+        const cust = sub.customer;
+        const status = sub.status === "active" || sub.status === "trialing" ? "active" : sub.status === "past_due" ? "past_due" : "cancelled";
+        const endDate = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
+        await pool.query(
+          `UPDATE families SET subscription_status = $1, subscription_end = $2 WHERE stripe_customer_id = $3`,
+          [status, endDate, cust]
+        );
+        console.log(`[STRIPE] Suscripción actualizada para customer ${cust}: ${status}`);
+        break;
+      }
+      case "customer.subscription.deleted": {
+        const sub = event.data.object;
+        await pool.query(
+          `UPDATE families SET subscription_status = 'cancelled', subscription_end = NOW() WHERE stripe_customer_id = $1`,
+          [sub.customer]
+        );
+        console.log(`[STRIPE] Suscripción cancelada para customer ${sub.customer}`);
+        break;
+      }
+      case "invoice.payment_failed": {
+        const invoice = event.data.object;
+        await pool.query(
+          `UPDATE families SET subscription_status = 'past_due' WHERE stripe_customer_id = $1`,
+          [invoice.customer]
+        );
+        console.log(`[STRIPE] Pago fallido para customer ${invoice.customer}`);
+        break;
+      }
+    }
+  } catch (err) {
+    console.error("[STRIPE WEBHOOK] Error procesando:", err.message);
+  }
+
+  res.json({ received: true });
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -504,6 +597,28 @@ ensureDoctorTables().catch((error) => {
   console.error("ERROR: No se pudo crear doctors:", error.message);
 });
 
+// ── Billing / Stripe columns en families ──
+async function ensureBillingColumns() {
+  const cols = [
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255)`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(255)`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50) NOT NULL DEFAULT 'trial'`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_start TIMESTAMPTZ`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_end TIMESTAMPTZ`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '30 days')`,
+  ];
+  for (const sql of cols) {
+    try { await pool.query(sql); } catch (e) {
+      if (!e.message.includes("already exists")) console.error("[BILLING SCHEMA]", e.message);
+    }
+  }
+  // Set trial for existing families without status
+  await pool.query(
+    `UPDATE families SET trial_ends_at = NOW() + INTERVAL '30 days' WHERE trial_ends_at IS NULL AND subscription_status = 'trial'`
+  );
+}
+ensureBillingColumns().catch((e) => console.error("ERROR billing columns:", e.message));
+
 async function sendAdminAlertEmail(subject, html, attachments) {
   if (!mailTransport || !ADMIN_EMAIL) {
     return false;
@@ -965,6 +1080,36 @@ function requireAuth(req, res, next) {
   return next();
 }
 
+// Middleware: verifica que la familia tenga suscripción activa o trial vigente
+function requireActiveSubscription(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: "no autenticado" });
+  const familyId = req.user.family_id;
+  if (!familyId) return next(); // Si no hay family_id, dejamos pasar (se controlará en el endpoint)
+  pool.query(`SELECT subscription_status, trial_ends_at FROM families WHERE id = $1`, [familyId])
+    .then((result) => {
+      const fam = result.rows[0];
+      if (!fam) return next();
+      const status = fam.subscription_status;
+      const now = new Date();
+      const trialOk = status === "trial" && fam.trial_ends_at && new Date(fam.trial_ends_at) > now;
+      const subOk = status === "active";
+      if (subOk || trialOk) return next();
+      return res.status(402).json({
+        error: "Suscripción inactiva",
+        code: "SUBSCRIPTION_REQUIRED",
+        status: status,
+        trial_expired: status === "trial",
+        message: status === "trial"
+          ? "Tu período de prueba ha expirado. Activa tu suscripción para continuar."
+          : "Tu suscripción no está activa. Renueva tu plan para continuar.",
+      });
+    })
+    .catch((err) => {
+      console.error("[SUB CHECK]", err.message);
+      return next(); // En caso de error de DB, dejamos pasar
+    });
+}
+
 function requireAuthHtml(req, res, next) {
   if (!req.user) {
     return res.redirect("/admin/login");
@@ -1042,6 +1187,7 @@ function renderShell(req, title, active, content) {
     { key: "dose", label: "🩺 Cambios de dosis", href: "/admin/dose-requests" },
     { key: "history", label: "📁 Historial médico", href: "/admin/medical-records" },
     { key: "imports", label: "⬆ Importaciones", href: "/admin/import" },
+    { key: "billing", label: "💳 Facturación", href: "/admin/billing" },
     { key: "settings", label: "⚙ Ajustes", href: "/admin/settings" },
   ];
   return `
@@ -3750,6 +3896,169 @@ app.post("/api/push/test", requireAuth, async (req, res) => {
     body: "Tienes tomas pendientes.",
   });
   res.json({ ok: true });
+});
+
+// =============================================================================
+// BILLING / STRIPE ENDPOINTS
+// =============================================================================
+
+// Estado de suscripción de la familia
+app.get("/api/billing/status", requireAuth, async (req, res) => {
+  const familyId = Number(getFamilyId(req));
+  if (!familyId) return res.status(400).json({ error: "family_id requerido" });
+  try {
+    const result = await pool.query(
+      `SELECT subscription_status, subscription_start, subscription_end, trial_ends_at, stripe_customer_id
+       FROM families WHERE id = $1`,
+      [familyId]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Familia no encontrada" });
+    const fam = result.rows[0];
+    const now = new Date();
+    const trialActive = fam.subscription_status === "trial" && fam.trial_ends_at && new Date(fam.trial_ends_at) > now;
+    const subActive = fam.subscription_status === "active";
+    const daysLeft = trialActive ? Math.ceil((new Date(fam.trial_ends_at) - now) / (1000 * 60 * 60 * 24)) : 0;
+
+    res.json({
+      status: fam.subscription_status,
+      active: subActive || trialActive,
+      trial: trialActive,
+      days_left: trialActive ? daysLeft : null,
+      trial_ends_at: fam.trial_ends_at,
+      subscription_start: fam.subscription_start,
+      subscription_end: fam.subscription_end,
+      has_customer: !!fam.stripe_customer_id,
+      stripe_configured: !!stripe,
+    });
+  } catch (err) {
+    console.error("[BILLING STATUS]", err.message);
+    res.status(500).json({ error: "Error al consultar estado" });
+  }
+});
+
+// Crear sesión de Stripe Checkout
+app.post("/api/billing/create-checkout", requireAuth, async (req, res) => {
+  if (!stripe || !STRIPE_PRICE_ID) {
+    return res.status(400).json({ error: "Stripe no configurado. Contacte al administrador." });
+  }
+  const familyId = Number(getFamilyId(req));
+  if (!familyId) return res.status(400).json({ error: "family_id requerido" });
+
+  try {
+    // Check if family already has a customer
+    const fam = await pool.query(`SELECT stripe_customer_id, name FROM families WHERE id = $1`, [familyId]);
+    if (!fam.rows.length) return res.status(404).json({ error: "Familia no encontrada" });
+
+    let customerId = fam.rows[0].stripe_customer_id;
+    if (!customerId) {
+      // Create Stripe customer
+      const customer = await stripe.customers.create({
+        metadata: { family_id: String(familyId) },
+        name: fam.rows[0].name || `Familia ${familyId}`,
+        email: req.user.email || undefined,
+      });
+      customerId = customer.id;
+      await pool.query(`UPDATE families SET stripe_customer_id = $1 WHERE id = $2`, [customerId, familyId]);
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ["card"],
+      mode: "subscription",
+      line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
+      success_url: `${FRONTEND_URL}/billing?success=1`,
+      cancel_url: `${FRONTEND_URL}/billing?cancelled=1`,
+      metadata: { family_id: String(familyId) },
+      subscription_data: { metadata: { family_id: String(familyId) } },
+    });
+
+    console.log(`[STRIPE] Checkout creado para familia ${familyId}: ${session.id}`);
+    res.json({ url: session.url, session_id: session.id });
+  } catch (err) {
+    console.error("[STRIPE CHECKOUT]", err.message);
+    res.status(500).json({ error: "Error al crear sesión de pago" });
+  }
+});
+
+// Portal de clientes (para gestionar/cancelar suscripción)
+app.post("/api/billing/portal", requireAuth, async (req, res) => {
+  if (!stripe) return res.status(400).json({ error: "Stripe no configurado" });
+  const familyId = Number(getFamilyId(req));
+  if (!familyId) return res.status(400).json({ error: "family_id requerido" });
+
+  try {
+    const fam = await pool.query(`SELECT stripe_customer_id FROM families WHERE id = $1`, [familyId]);
+    if (!fam.rows[0]?.stripe_customer_id) {
+      return res.status(400).json({ error: "No hay suscripción activa" });
+    }
+    const session = await stripe.billingPortal.sessions.create({
+      customer: fam.rows[0].stripe_customer_id,
+      return_url: `${FRONTEND_URL}/billing`,
+    });
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error("[STRIPE PORTAL]", err.message);
+    res.status(500).json({ error: "Error al crear portal" });
+  }
+});
+
+// Admin: ver billing de todas las familias
+app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const families = await pool.query(
+      `SELECT f.id, f.name, f.subscription_status, f.trial_ends_at, f.subscription_start, f.subscription_end,
+              f.stripe_customer_id, COUNT(u.id) AS user_count
+       FROM families f LEFT JOIN users u ON u.family_id = f.id
+       GROUP BY f.id ORDER BY f.id`
+    );
+
+    const statusBadge = (s) => {
+      if (s === "active") return `<span class="badge info">Activa</span>`;
+      if (s === "trial") return `<span class="badge warn">Prueba</span>`;
+      if (s === "past_due") return `<span class="badge critical">Pago pendiente</span>`;
+      return `<span class="badge critical">Cancelada</span>`;
+    };
+
+    const content = `
+      <div class="card">
+        <h1>Facturación / Suscripciones</h1>
+        <p class="muted" style="margin-bottom:16px;">Estado de pago de todas las familias registradas.</p>
+        ${stripe ? `<p style="font-size:12px; color:#059669; margin-bottom:12px;">● Stripe conectado (${STRIPE_SECRET_KEY.startsWith("sk_test") ? "MODO TEST" : "PRODUCCIÓN"})</p>` : `<p style="font-size:12px; color:#dc2626; margin-bottom:12px;">● Stripe NO configurado</p>`}
+        <div style="overflow:auto;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Familia</th>
+                <th>Estado</th>
+                <th>Trial expira</th>
+                <th>Suscripción inicio</th>
+                <th>Usuarios</th>
+                <th>Stripe ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${families.rows.map(f => `
+                <tr>
+                  <td>${f.id}</td>
+                  <td>${escapeHtml(f.name || "Sin nombre")}</td>
+                  <td>${statusBadge(f.subscription_status)}</td>
+                  <td>${f.trial_ends_at ? new Date(f.trial_ends_at).toLocaleDateString("es-ES") : "-"}</td>
+                  <td>${f.subscription_start ? new Date(f.subscription_start).toLocaleDateString("es-ES") : "-"}</td>
+                  <td>${f.user_count}</td>
+                  <td style="font-size:10px; word-break:break-all;">${f.stripe_customer_id ? escapeHtml(f.stripe_customer_id) : "-"}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    res.send(renderShell(req, "Facturación", "billing", content));
+  } catch (err) {
+    console.error("[ADMIN BILLING]", err.message);
+    res.status(500).send("Error al cargar facturación");
+  }
 });
 
 // =============================================================================
