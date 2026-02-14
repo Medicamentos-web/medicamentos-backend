@@ -1146,7 +1146,9 @@ function renderShell(req, title, active, content) {
                 <div class="breadcrumb">${escapeHtml(title)}</div>
               </div>
               <div class="search">
-                <input placeholder="Buscar paciente, medicamento o alerta" />
+                <form method="GET" action="/admin/search" style="margin:0;">
+                  <input name="q" placeholder="Buscar paciente, medicamento o alerta" />
+                </form>
               </div>
               <div class="top-actions">
                 <span class="chip">● Sincronizado</span>
@@ -1821,8 +1823,8 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
     <div class="card context">
       <div class="left">
         <label>Paciente activo</label>
-        <form method="GET" action="/dashboard">
-          <select name="user_id">
+        <form method="GET" action="/dashboard" id="patientForm">
+          <select name="user_id" onchange="document.getElementById('patientForm').submit()">
             ${
               usersList.rows.length
                 ? usersList.rows
@@ -3748,6 +3750,155 @@ app.post("/api/push/test", requireAuth, async (req, res) => {
     body: "Tienes tomas pendientes.",
   });
   res.json({ ok: true });
+});
+
+// =============================================================================
+// DISCLAIMER ACCEPTANCE (legal)
+// =============================================================================
+app.post("/api/disclaimer-accepted", requireAuth, async (req, res) => {
+  const { user_id, family_id, accepted_at } = req.body || {};
+  const userId = Number(user_id || req.user.sub);
+  const familyId = Number(family_id || getFamilyId(req));
+  const ts = accepted_at || new Date().toISOString();
+
+  try {
+    // Get user info
+    const userResult = await pool.query(
+      `SELECT name, email FROM users WHERE id = $1 AND family_id = $2`,
+      [userId, familyId]
+    );
+    const u = userResult.rows[0];
+    if (!u) return res.status(404).json({ error: "Usuario no encontrado" });
+
+    const disclaimerHtml = `
+      <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+        <h2 style="color:#0f172a;">Confirmación de aceptación del aviso legal</h2>
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:16px; margin:16px 0;">
+          <p style="font-size:14px; color:#334155; line-height:1.6;">
+            Esta aplicación es una herramienta de apoyo para la gestión y el recordatorio de la medicación
+            prescrita por su médico de cabecera. En ningún caso sustituye, modifica ni reemplaza el diagnóstico,
+            la prescripción ni las indicaciones de su profesional sanitario. El usuario se compromete a seguir
+            siempre las instrucciones de su médico tratante. El uso de esta aplicación no establece una relación
+            médico-paciente. Ante cualquier duda sobre su medicación, consulte a su médico o farmacéutico.
+          </p>
+        </div>
+        <table style="width:100%; font-size:14px; color:#475569; border-collapse:collapse;">
+          <tr><td style="padding:6px 0; font-weight:bold;">Usuario:</td><td>${u.name || "N/A"}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:bold;">Email:</td><td>${u.email}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:bold;">Fecha de aceptación:</td><td>${new Date(ts).toLocaleString("es-ES", { timeZone: "Europe/Zurich" })}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:bold;">IP:</td><td>${req.ip || "N/A"}</td></tr>
+          <tr><td style="padding:6px 0; font-weight:bold;">User-Agent:</td><td style="word-break:break-all;">${req.headers["user-agent"] || "N/A"}</td></tr>
+        </table>
+        <p style="font-size:11px; color:#94a3b8; margin-top:16px;">
+          Este correo se genera automáticamente como registro legal de la aceptación de los términos de uso.
+          Conserve este mensaje como comprobante.
+        </p>
+      </div>
+    `;
+
+    const subject = `Aceptación del aviso legal – ${u.name || u.email}`;
+
+    // Send to user
+    if (mailTransport && u.email) {
+      try { await sendUserEmail(u.email, subject, disclaimerHtml); } catch (e) { console.error("[DISCLAIMER] Error email usuario:", e.message); }
+    }
+    // Send to admin
+    if (mailTransport && ADMIN_EMAIL) {
+      try { await sendAdminAlertEmail(subject, disclaimerHtml); } catch (e) { console.error("[DISCLAIMER] Error email admin:", e.message); }
+    }
+
+    console.log(`[DISCLAIMER] Aceptado por user ${userId} (${u.email}) a las ${ts}`);
+    res.json({ ok: true, message: "Aceptación registrada" });
+  } catch (err) {
+    console.error("[DISCLAIMER] Error:", err.message);
+    res.status(500).json({ error: "Error al registrar aceptación" });
+  }
+});
+
+// =============================================================================
+// ADMIN GLOBAL SEARCH
+// =============================================================================
+app.get("/admin/search", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const familyId = req.user.family_id;
+  const q = (req.query?.q || "").trim();
+  if (!q) return res.redirect("/dashboard");
+
+  try {
+    const like = `%${q}%`;
+    const [users, meds, alertsResult] = await Promise.all([
+      pool.query(
+        `SELECT id, name, email, role FROM users WHERE family_id = $1 AND (name ILIKE $2 OR email ILIKE $2 OR first_name ILIKE $2 OR last_name ILIKE $2) ORDER BY name LIMIT 20`,
+        [familyId, like]
+      ),
+      pool.query(
+        `SELECT m.id, m.name, m.dosage, m.current_stock, u.name AS user_name
+         FROM medicines m JOIN users u ON u.id = m.user_id
+         WHERE m.family_id = $1 AND (m.name ILIKE $2 OR m.dosage ILIKE $2) ORDER BY m.name LIMIT 20`,
+        [familyId, like]
+      ),
+      pool.query(
+        `SELECT id, type, message, med_name, created_at FROM alerts
+         WHERE family_id = $1 AND (message ILIKE $2 OR med_name ILIKE $2) ORDER BY created_at DESC LIMIT 20`,
+        [familyId, like]
+      ),
+    ]);
+
+    const escQ = escapeHtml(q);
+    const content = `
+      <div class="card">
+        <h1>Resultados para "${escQ}"</h1>
+
+        <h2 style="margin-top:18px; font-size:16px;">👤 Pacientes (${users.rows.length})</h2>
+        ${users.rows.length ? `
+          <div class="list">
+            ${users.rows.map(u => `
+              <div class="list-item" style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <strong>${escapeHtml(u.name)}</strong>
+                  <div class="meta">${escapeHtml(u.email)} · ${u.role}</div>
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <a class="btn outline" href="/admin/user-edit/${u.id}">Editar</a>
+                  <a class="btn outline" href="/admin/meds/${u.id}">Medicamentos</a>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<p class="empty">Sin resultados</p>`}
+
+        <h2 style="margin-top:18px; font-size:16px;">💊 Medicamentos (${meds.rows.length})</h2>
+        ${meds.rows.length ? `
+          <div class="list">
+            ${meds.rows.map(m => `
+              <div class="list-item" style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <strong>${escapeHtml(m.name)}</strong> · ${escapeHtml(m.dosage || "")}
+                  <div class="meta">Stock: ${m.current_stock} · Paciente: ${escapeHtml(m.user_name || "")}</div>
+                </div>
+                <a class="btn outline" href="/admin/meds-edit/${m.id}">Editar</a>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<p class="empty">Sin resultados</p>`}
+
+        <h2 style="margin-top:18px; font-size:16px;">🔔 Alertas (${alertsResult.rows.length})</h2>
+        ${alertsResult.rows.length ? `
+          <div class="list">
+            ${alertsResult.rows.map(a => `
+              <div class="list-item">
+                <strong>${escapeHtml(a.med_name || a.type)}</strong>
+                <div class="meta">${escapeHtml(a.message || "")} · ${a.created_at ? new Date(a.created_at).toLocaleDateString("es-ES") : ""}</div>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<p class="empty">Sin resultados</p>`}
+      </div>
+    `;
+    res.send(renderShell(req, `Búsqueda: ${escQ}`, "home", content));
+  } catch (err) {
+    console.error("[SEARCH] Error:", err.message);
+    res.redirect("/dashboard");
+  }
 });
 
 // =============================================================================
