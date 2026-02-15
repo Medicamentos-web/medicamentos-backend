@@ -261,6 +261,10 @@ async function ensureUserColumns() {
   await pool.query(
     `UPDATE users SET must_change_password = false WHERE must_change_password IS NULL`
   );
+  // Disclaimer acceptance tracking
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS disclaimer_accepted_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS disclaimer_ip VARCHAR(100)`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS disclaimer_lang VARCHAR(10)`);
 }
 
 ensureUserColumns().catch((error) => {
@@ -2327,7 +2331,8 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
   const id = Number(req.params.id);
   const [result, doctorResult] = await Promise.all([
     pool.query(
-      `SELECT id, name, first_name, last_name, birth_date, street, house_number, postal_code, city, email, role
+      `SELECT id, name, first_name, last_name, birth_date, street, house_number, postal_code, city, email, role,
+              disclaimer_accepted_at, disclaimer_ip, disclaimer_lang
        FROM users WHERE id = $1 AND family_id = $2`,
       [id, familyId]
     ),
@@ -2345,6 +2350,18 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
   const content = `
     <div class="card" style="max-width:640px; margin:0 auto;">
       <h1>Editar usuario</h1>
+      ${user.disclaimer_accepted_at
+        ? `<div style="background:#ECFDF5; border:1px solid #6EE7B7; border-radius:12px; padding:12px; margin-bottom:16px;">
+            <p style="font-size:13px; color:#065F46; margin:0;">
+              ✅ <strong>Aviso legal aceptado</strong> el ${new Date(user.disclaimer_accepted_at).toLocaleString("es-ES", { timeZone: "Europe/Zurich" })}
+              · Idioma: ${escapeHtml(user.disclaimer_lang || "es")}
+              · IP: ${escapeHtml(user.disclaimer_ip || "N/A")}
+            </p>
+          </div>`
+        : `<div style="background:#FEF3C7; border:1px solid #FBBF24; border-radius:12px; padding:12px; margin-bottom:16px;">
+            <p style="font-size:13px; color:#92400E; margin:0;">⚠️ <strong>Aviso legal NO aceptado</strong> - El usuario aún no ha aceptado los términos de uso.</p>
+          </div>`
+      }
       <form method="POST" action="/admin/user-save">
         <input type="hidden" name="id" value="${user.id}" />
         <label>Nombre</label>
@@ -4159,12 +4176,18 @@ app.post("/api/feedback", requireAuth, async (req, res) => {
 // DISCLAIMER ACCEPTANCE (legal)
 // =============================================================================
 app.post("/api/disclaimer-accepted", requireAuth, async (req, res) => {
-  const { user_id, family_id, accepted_at } = req.body || {};
+  const { user_id, family_id, accepted_at, lang: userLang } = req.body || {};
   const userId = Number(user_id || req.user.sub);
   const familyId = Number(family_id || getFamilyId(req));
   const ts = accepted_at || new Date().toISOString();
 
   try {
+    // Save acceptance in DB
+    await pool.query(
+      `UPDATE users SET disclaimer_accepted_at = $1, disclaimer_ip = $2, disclaimer_lang = $3 WHERE id = $4 AND family_id = $5`,
+      [ts, req.ip || req.headers["x-forwarded-for"] || "unknown", userLang || "es", userId, familyId]
+    );
+
     // Get user info
     const userResult = await pool.query(
       `SELECT name, email FROM users WHERE id = $1 AND family_id = $2`,
