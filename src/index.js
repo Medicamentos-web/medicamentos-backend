@@ -573,6 +573,14 @@ ensureMedicineEndDate().catch((error) => {
   console.error("ERROR: No se pudo añadir end_date a medicines:", error.message);
 });
 
+// Columna para pausar medicamentos sin stock
+async function ensureStockDepleted() {
+  await pool.query(`ALTER TABLE medicines ADD COLUMN IF NOT EXISTS stock_depleted BOOLEAN NOT NULL DEFAULT FALSE`);
+  // Marcar los que ya tienen stock=0
+  await pool.query(`UPDATE medicines SET stock_depleted = TRUE WHERE current_stock = 0 AND stock_depleted = FALSE`);
+}
+ensureStockDepleted().catch((e) => console.error("ERROR stock_depleted:", e.message));
+
 async function ensureDoctorTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS doctors (
@@ -999,15 +1007,24 @@ async function upsertMedicineForUser({
   );
   if (dup) {
     const newStock = Number(dup.current_stock || 0) + Number(qty || 0);
+    // Reactivar medicamento si tenía stock agotado
     await pool.query(
-      `UPDATE medicines SET current_stock = $1 WHERE id = $2`,
+      `UPDATE medicines SET current_stock = $1, stock_depleted = FALSE WHERE id = $2`,
       [newStock, dup.id]
     );
+    // Borrar alertas de stock existentes para este medicamento (ya no aplican)
+    if (newStock > 0) {
+      await pool.query(
+        `DELETE FROM alerts WHERE family_id = $1 AND type IN ('low_stock', 'stock_low') AND med_name = $2`,
+        [familyId, dup.name]
+      );
+      console.log(`[STOCK] Reactivado: ${dup.name} → stock ${newStock}`);
+    }
     return { id: dup.id, action: "merged" };
   }
   const created = await pool.query(
-    `INSERT INTO medicines (family_id, user_id, name, dosage, current_stock, expiration_date, import_batch_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO medicines (family_id, user_id, name, dosage, current_stock, expiration_date, import_batch_id, stock_depleted)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)
      RETURNING id`,
     [familyId, userId, name, dosage, qty || 0, expiryDate || null, batchId || null]
   );
@@ -3462,6 +3479,7 @@ app.get("/api/meds-by-date", requireAuth, async (req, res) => {
        SELECT m.id, m.user_id, '08:00', '1', '1234567'
        FROM medicines m
        WHERE m.family_id = $1 AND m.user_id = $2
+         AND COALESCE(m.stock_depleted, FALSE) = FALSE
          AND NOT EXISTS (
            SELECT 1 FROM schedules s
            WHERE s.medicine_id = m.id AND s.user_id = m.user_id
@@ -3511,6 +3529,7 @@ app.get("/api/meds-by-date", requireAuth, async (req, res) => {
          AND (s.start_date IS NULL OR $3::date >= s.start_date)
          AND (s.end_date IS NULL OR $3::date <= s.end_date)
          AND (m.end_date IS NULL OR $3::date <= m.end_date)
+         AND COALESCE(m.stock_depleted, FALSE) = FALSE
        ORDER BY s.dose_time ASC`,
       [userId, familyId, date, dayToken]
     );
@@ -4391,19 +4410,31 @@ app.post("/api/daily-checkout", requireAuth, async (req, res) => {
 async function generateStockAlerts(familyId) {
   const today = new Date().toISOString().slice(0, 10);
   const lowStock = await pool.query(
-    `SELECT id, name, dosage, current_stock, user_id
+    `SELECT id, name, dosage, current_stock, user_id, stock_depleted
      FROM medicines
      WHERE family_id = $1 AND current_stock <= $2`,
     [familyId, LOW_STOCK_THRESHOLD]
   );
   let created = 0;
   for (const med of lowStock.rows) {
-    // Solo crear si no existe ya una alerta de stock para este medicamento hoy
+    // Si stock = 0 y ya está marcado como depleted, NO generar más alertas
+    // Solo se reactivará cuando el paciente escanee/importe nueva caja
+    if (med.current_stock === 0 && med.stock_depleted) {
+      continue; // Ya se envió la alerta, no repetir
+    }
+
+    // Si stock = 0 y NO estaba marcado, marcar como depleted y crear UNA alerta
+    if (med.current_stock === 0 && !med.stock_depleted) {
+      await pool.query(`UPDATE medicines SET stock_depleted = TRUE WHERE id = $1`, [med.id]);
+    }
+
+    // Solo crear si no existe ya una alerta de stock para este medicamento (cualquier día)
     const exists = await pool.query(
       `SELECT 1 FROM alerts
        WHERE family_id = $1 AND type = 'low_stock' AND med_name = $2
-         AND alert_date = $3::date AND (user_id = $4 OR ($4::int IS NULL AND user_id IS NULL))`,
-      [familyId, med.name, today, med.user_id]
+         AND (user_id = $3 OR ($3::int IS NULL AND user_id IS NULL))
+       LIMIT 1`,
+      [familyId, med.name, med.user_id]
     );
     if (exists.rows.length === 0) {
       await pool.query(
@@ -4495,9 +4526,9 @@ async function generateAlertsForFamily(familyId) {
 
 async function cleanupOldAlerts() {
   const today = new Date().toISOString().slice(0, 10);
-  // 1) Borrar TODAS las alertas de días pasados (read o no)
+  // 1) Borrar alertas de DOSIS de días pasados (read o no)
   await pool.query(
-    `DELETE FROM alerts WHERE alert_date IS NOT NULL AND alert_date < $1::date`,
+    `DELETE FROM alerts WHERE type = 'dose_due' AND alert_date IS NOT NULL AND alert_date < $1::date`,
     [today]
   );
   // 2) Borrar alertas dose_due ya confirmadas (tomadas hoy)
@@ -4511,10 +4542,10 @@ async function cleanupOldAlerts() {
            AND dl.status = 'taken'
        )`
   );
-  // 3) Borrar alertas de stock bajo si el stock ya supera el umbral
+  // 3) Borrar alertas de stock si el medicamento ya tiene stock suficiente (fue reabastecido)
   await pool.query(
     `DELETE FROM alerts a
-     WHERE a.type = 'low_stock'
+     WHERE a.type IN ('low_stock', 'stock_low')
        AND a.med_name IS NOT NULL
        AND EXISTS (
          SELECT 1 FROM medicines m
@@ -4522,6 +4553,7 @@ async function cleanupOldAlerts() {
            AND m.user_id = a.user_id
            AND m.name = a.med_name
            AND m.current_stock > $1
+           AND COALESCE(m.stock_depleted, FALSE) = FALSE
        )`,
     [LOW_STOCK_THRESHOLD]
   );
