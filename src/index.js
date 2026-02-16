@@ -1351,9 +1351,22 @@ async function importMedsFromPdf(filePath, familyId, userId, useOcr = false, ski
   const buffer = fs.readFileSync(filePath);
   const pdf = await pdfParse(buffer);
   let text = pdf.text;
-  if (useOcr || !text || text.trim().length < 20) {
-    text = await runOcrOnPdf(filePath, "deu");
+  let ocrUsed = false;
+  console.log(`[IMPORT PDF] pdf-parse text length: ${(text || "").length}`);
+  // Auto-fallback to OCR if pdf-parse gets little/no text
+  if (useOcr || !text || text.trim().length < 50) {
+    try {
+      text = await runOcrOnPdf(filePath, "deu+eng");
+      ocrUsed = true;
+      console.log(`[IMPORT PDF] OCR text length: ${(text || "").length}`);
+    } catch (ocrErr) {
+      console.error(`[IMPORT PDF] OCR failed:`, ocrErr.message);
+      if (!text || text.trim().length < 10) {
+        throw new Error("No se pudo extraer texto del PDF. OCR falló: " + ocrErr.message);
+      }
+    }
   }
+  const rawText = (text || "").slice(0, 2000);
   if (!skipNameCheck) {
     const userResult = await pool.query(
       `SELECT id, name, first_name, last_name FROM users WHERE id = $1 AND family_id = $2`,
@@ -1367,7 +1380,7 @@ async function importMedsFromPdf(filePath, familyId, userId, useOcr = false, ski
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("Medikament") && !line.startsWith("Seite"));
+    .filter((line) => line && line.length > 3 && !line.startsWith("Medikament") && !line.startsWith("Seite") && !line.startsWith("Datum"));
 
   const extractQuantity = (line) => {
     const match = line.match(/(\d+)\s*(Stk|ml|Amp|Btl)\b/i);
@@ -1479,7 +1492,8 @@ async function importMedsFromPdf(filePath, familyId, userId, useOcr = false, ski
     }
     inserted += 1;
   }
-  return { inserted, warnings, batchId };
+  console.log(`[IMPORT PDF] Resultado: ${inserted} medicamentos, ${warnings} advertencias, ${lines.length} líneas procesadas`);
+  return { inserted, warnings, batchId, rawText, ocrUsed, linesProcessed: lines.length };
 }
 
 function requireRole(roles) {
@@ -5406,11 +5420,11 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
               </select>
             </div>
             <div>
-              <label>Modo OCR</label>
-              <input name="use_ocr" type="checkbox" value="1" />
+              <label>Modo OCR (recomendado para PDFs escaneados)</label>
+              <input name="use_ocr" type="checkbox" value="1" checked />
             </div>
             <div>
-              <label>Omitir verificación de nombre (solo test)</label>
+              <label>Omitir verificación de nombre</label>
               <input name="skip_name_check" type="checkbox" value="1" />
             </div>
           </div>
@@ -5653,13 +5667,28 @@ app.post(
       useOcr,
       skipNameCheck
     );
+    const debugSection = result.inserted === 0 ? `
+      <div style="margin-top:16px; background:#fef3c7; border:1px solid #f59e0b; border-radius:14px; padding:16px;">
+        <h3 style="margin:0 0 8px; font-size:14px; color:#92400e;">No se encontraron medicamentos</h3>
+        <p style="font-size:12px; color:#78350f; margin-bottom:8px;">
+          OCR utilizado: ${result.ocrUsed ? "Sí" : "No"} · Líneas procesadas: ${result.linesProcessed || 0}
+        </p>
+        <p style="font-size:11px; color:#92400e; margin-bottom:4px;">Texto extraído del PDF (primeros 2000 caracteres):</p>
+        <pre style="background:#fffbeb; border:1px solid #fbbf24; border-radius:8px; padding:10px; font-size:11px; max-height:300px; overflow:auto; white-space:pre-wrap; word-break:break-all;">${escapeHtml(result.rawText || "(vacío)")}</pre>
+        <p style="font-size:11px; color:#78350f; margin-top:8px;">
+          <strong>Sugerencias:</strong> Si el texto está vacío, el PDF probablemente es una imagen escaneada — marca "Modo OCR" y reintenta. 
+          Si hay texto pero 0 medicamentos, el formato del PDF no coincide con el parser esperado (columnas Mo/Mi/Ab/Na con "auf weiteres").
+        </p>
+      </div>` : "";
     const content = `
       <div class="card">
         <h1>Importación completa</h1>
-        <p><span style="display:inline-block; background:#111827; color:#fff; padding:6px 12px; border-radius:999px; font-size:12px;">${result.inserted} medicamentos</span></p>
+        <p><span style="display:inline-block; background:${result.inserted > 0 ? "#111827" : "#dc2626"}; color:#fff; padding:6px 12px; border-radius:999px; font-size:12px;">${result.inserted} medicamentos</span></p>
         <p>Advertencias: ${result.warnings}</p>
+        ${debugSection}
         <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
           <a class="btn outline" href="/admin/meds-list?review=1">Revisar posibles errores</a>
+          <a class="btn outline" href="/admin/import">Reintentar</a>
           <a class="btn outline" href="/dashboard">Volver</a>
         </div>
       </div>
