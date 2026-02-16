@@ -621,7 +621,9 @@ async function ensureBillingColumns() {
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50) NOT NULL DEFAULT 'trial'`,
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_start TIMESTAMPTZ`,
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_end TIMESTAMPTZ`,
-    `ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '30 days')`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '7 days')`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_email_sent BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS max_medicines INTEGER DEFAULT 5`,
   ];
   for (const sql of cols) {
     try { await pool.query(sql); } catch (e) {
@@ -630,7 +632,7 @@ async function ensureBillingColumns() {
   }
   // Set trial for existing families without status
   await pool.query(
-    `UPDATE families SET trial_ends_at = NOW() + INTERVAL '30 days' WHERE trial_ends_at IS NULL AND subscription_status = 'trial'`
+    `UPDATE families SET trial_ends_at = NOW() + INTERVAL '7 days' WHERE trial_ends_at IS NULL AND subscription_status = 'trial'`
   );
 }
 ensureBillingColumns().catch((e) => console.error("ERROR billing columns:", e.message));
@@ -1035,6 +1037,7 @@ async function upsertMedicineForUser({
       normalizeText(row.dosage || "") === normDosage
   );
   if (dup) {
+    // Merge: actualizar stock (no cuenta como nuevo medicamento)
     const newStock = Number(dup.current_stock || 0) + Number(qty || 0);
     // Reactivar medicamento si tenía stock agotado
     await pool.query(
@@ -1051,6 +1054,25 @@ async function upsertMedicineForUser({
     }
     return { id: dup.id, action: "merged" };
   }
+  // Verificar límite de medicamentos para trial/beta
+  try {
+    const famResult = await pool.query(
+      `SELECT subscription_status, max_medicines, trial_ends_at FROM families WHERE id = $1`,
+      [familyId]
+    );
+    const fam = famResult.rows[0];
+    if (fam && fam.subscription_status === "trial") {
+      const maxMeds = fam.max_medicines || 5;
+      const currentCount = existing.rows.length;
+      if (currentCount >= maxMeds) {
+        throw new Error(`Límite de ${maxMeds} medicamentos alcanzado en la versión de prueba. Activa tu suscripción para añadir más.`);
+      }
+    }
+  } catch (limitErr) {
+    if (limitErr.message.includes("Límite de")) throw limitErr;
+    console.error("[MED LIMIT CHECK]", limitErr.message);
+  }
+
   const created = await pool.query(
     `INSERT INTO medicines (family_id, user_id, name, dosage, current_stock, expiration_date, import_batch_id, stock_depleted)
      VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)
@@ -3983,7 +4005,7 @@ app.get("/api/billing/status", requireAuth, async (req, res) => {
   if (!familyId) return res.status(400).json({ error: "family_id requerido" });
   try {
     const result = await pool.query(
-      `SELECT subscription_status, subscription_start, subscription_end, trial_ends_at, stripe_customer_id
+      `SELECT subscription_status, subscription_start, subscription_end, trial_ends_at, stripe_customer_id, max_medicines
        FROM families WHERE id = $1`,
       [familyId]
     );
@@ -3993,17 +4015,26 @@ app.get("/api/billing/status", requireAuth, async (req, res) => {
     const trialActive = fam.subscription_status === "trial" && fam.trial_ends_at && new Date(fam.trial_ends_at) > now;
     const subActive = fam.subscription_status === "active";
     const daysLeft = trialActive ? Math.ceil((new Date(fam.trial_ends_at) - now) / (1000 * 60 * 60 * 24)) : 0;
+    // Contar medicamentos actuales
+    const medsCount = await pool.query(
+      `SELECT COUNT(*) FROM medicines WHERE family_id = $1`, [familyId]
+    );
+    const currentMeds = Number(medsCount.rows[0]?.count || 0);
+    const maxMeds = fam.subscription_status === "trial" ? (fam.max_medicines || 5) : null;
 
     res.json({
       status: fam.subscription_status,
       active: subActive || trialActive,
       trial: trialActive,
-      days_left: trialActive ? daysLeft : null,
+      trial_expired: fam.subscription_status === "trial" && !trialActive,
+      days_left: trialActive ? daysLeft : 0,
       trial_ends_at: fam.trial_ends_at,
       subscription_start: fam.subscription_start,
       subscription_end: fam.subscription_end,
       has_customer: !!fam.stripe_customer_id,
       stripe_configured: !!stripe,
+      max_medicines: maxMeds,
+      current_medicines: currentMeds,
     });
   } catch (err) {
     console.error("[BILLING STATUS]", err.message);
@@ -6013,7 +6044,104 @@ app.listen(port, "0.0.0.0", () => {
 });
 
 // Job automático de alertas: cada 4 horas
-// Stock bajo: se genera 1x/día | Dosis pendientes: cada 4h | Pasadas: auto-borradas
 setInterval(runAlertsJob, 4 * 60 * 60 * 1000);
-// Ejecutar al arrancar con delay para dar tiempo a la DB
 setTimeout(runAlertsJob, 10000);
+
+// ── Trial expiry check: cada 1 hora ──
+async function checkTrialExpiry() {
+  try {
+    const expired = await pool.query(
+      `SELECT f.id, f.name, u.email, u.first_name, u.last_name
+       FROM families f
+       JOIN users u ON u.family_id = f.id AND u.role IN ('admin','superuser','user')
+       WHERE f.subscription_status = 'trial'
+         AND f.trial_ends_at < NOW()
+         AND (f.trial_email_sent IS NULL OR f.trial_email_sent = FALSE)
+       ORDER BY f.id, u.id`
+    );
+    if (expired.rows.length === 0) return;
+    const sentFamilies = new Set();
+    for (const row of expired.rows) {
+      if (sentFamilies.has(row.id)) continue;
+      sentFamilies.add(row.id);
+      if (!mailTransport || !row.email) continue;
+      const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
+      try {
+        await mailTransport.sendMail({
+          from: process.env.SMTP_USER,
+          to: row.email,
+          subject: "Tu período de prueba ha finalizado – Medicamentos App",
+          html: `
+<div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+  <div style="background:linear-gradient(135deg,#0f172a,#1e40af); color:white; padding:30px; border-radius:16px 16px 0 0; text-align:center;">
+    <h1 style="margin:0; font-size:24px;">⚕️ Medicamentos</h1>
+    <p style="margin:8px 0 0; opacity:0.8;">Gestión de medicación inteligente</p>
+  </div>
+  <div style="background:white; padding:30px; border:1px solid #e2e8f0; border-top:none;">
+    <p>Hola <strong>${row.first_name || row.name || "usuario"}</strong>,</p>
+    <p>Tu período de prueba gratuito de 7 días ha finalizado. Durante este tiempo, pudiste gestionar hasta 5 medicamentos.</p>
+    <h2 style="color:#1e40af; font-size:18px;">Activa tu suscripción</h2>
+    <p>Para continuar usando todas las funciones sin límites:</p>
+    <ul style="color:#475569;">
+      <li>Medicamentos <strong>ilimitados</strong></li>
+      <li>Alertas inteligentes y push notifications</li>
+      <li>Escaneo OCR de recetas y medicamentos</li>
+      <li>Historial médico completo</li>
+      <li>Contacto directo con tu médico</li>
+      <li>Soporte prioritario</li>
+    </ul>
+    <div style="text-align:center; margin:24px 0;">
+      <a href="${FRONTEND}/billing" style="display:inline-block; background:#2563eb; color:white; padding:14px 32px; border-radius:12px; text-decoration:none; font-weight:bold; font-size:16px;">
+        Activar suscripción – CHF 9.90/mes
+      </a>
+    </div>
+    <hr style="border:none; border-top:1px solid #e2e8f0; margin:24px 0;">
+    <h3 style="color:#0f172a; font-size:14px;">Información legal importante</h3>
+    <p style="font-size:12px; color:#64748b; line-height:1.6;">
+      Medicamentos App es un servicio de software como servicio (SaaS) con domicilio en Suiza,
+      sujeto al derecho suizo. El servicio proporciona una herramienta digital de apoyo para la
+      gestión y el recordatorio de la medicación prescrita por el médico tratante del usuario.<br><br>
+      <strong>Exclusión de responsabilidad médica:</strong> Esta aplicación NO sustituye, modifica
+      ni reemplaza el diagnóstico, la prescripción ni las indicaciones de un profesional sanitario.
+      El proveedor del servicio es exclusivamente responsable del correcto funcionamiento del software.
+      No asume ninguna responsabilidad por decisiones médicas tomadas por el usuario sin consultar
+      a su médico. El usuario se compromete a seguir siempre las instrucciones de su médico tratante.<br><br>
+      <strong>Protección de datos:</strong> Los datos personales se procesan conforme a la Ley Federal
+      de Protección de Datos de Suiza (nDSG/FADP) y, cuando aplique, al RGPD de la UE.
+      Los datos se almacenan en servidores seguros con cifrado SSL/TLS.<br><br>
+      <strong>Contrato:</strong> Al activar la suscripción, el usuario acepta los términos del servicio
+      SaaS. La suscripción se renueva mensualmente y puede cancelarse en cualquier momento desde el
+      panel de facturación. No hay período mínimo de permanencia.
+    </p>
+  </div>
+  <div style="background:#f8fafc; padding:16px; border-radius:0 0 16px 16px; border:1px solid #e2e8f0; border-top:none; text-align:center;">
+    <p style="font-size:11px; color:#94a3b8; margin:0;">
+      © ${new Date().getFullYear()} Medicamentos App · Suiza · 
+      <a href="${FRONTEND}" style="color:#2563eb;">medicamentos-app.ch</a>
+    </p>
+  </div>
+</div>`,
+        });
+        console.log(`[TRIAL] Email de oferta enviado a ${row.email} (familia ${row.id})`);
+      } catch (emailErr) {
+        console.error(`[TRIAL] Error enviando email a ${row.email}:`, emailErr.message);
+      }
+      // Marcar como enviado
+      await pool.query(`UPDATE families SET trial_email_sent = TRUE WHERE id = $1`, [row.id]);
+      // Notificar admin
+      if (ADMIN_EMAIL && mailTransport) {
+        try {
+          await mailTransport.sendMail({
+            from: process.env.SMTP_USER, to: ADMIN_EMAIL,
+            subject: `Trial expirado: Familia ${row.name || row.id}`,
+            html: `<p>El trial de la familia <strong>${row.name || row.id}</strong> (${row.email}) ha expirado. Se envió email de oferta.</p>`,
+          });
+        } catch {}
+      }
+    }
+  } catch (err) {
+    console.error("[TRIAL CHECK]", err.message);
+  }
+}
+setInterval(checkTrialExpiry, 60 * 60 * 1000); // cada hora
+setTimeout(checkTrialExpiry, 30000); // 30s después de arrancar
