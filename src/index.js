@@ -12,7 +12,11 @@ const PDFDocument = require("pdfkit");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
-const { Pool } = require("pg");
+const pg = require("pg");
+const { Pool } = pg;
+// Fix: devolver DATE (oid 1082) como string "YYYY-MM-DD" en vez de objeto Date
+// Esto previene el bug de timezone donde la fecha pierde un día
+pg.types.setTypeParser(1082, (val) => val);
 const Stripe = require("stripe");
 
 const app = express();
@@ -789,9 +793,30 @@ function patientNameMatches(text, user) {
 
 function normalizeDateOnly(value) {
   if (!value) return "";
-  const asDate = value instanceof Date ? value : new Date(value);
+  // Si ya es string ISO "YYYY-MM-DD", devolver directo (evita timezone shift)
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+    return value.slice(0, 10);
+  }
+  // Si es Date, usar componentes locales (no UTC) para evitar -1 día
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "";
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, "0");
+    const d = String(value.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  // Formato DD.MM.YYYY (europeo)
+  const euMatch = String(value).match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (euMatch) {
+    return `${euMatch[3]}-${euMatch[2].padStart(2, "0")}-${euMatch[1].padStart(2, "0")}`;
+  }
+  // Fallback: intentar parsear
+  const asDate = new Date(value);
   if (Number.isNaN(asDate.getTime())) return "";
-  return asDate.toISOString().slice(0, 10);
+  const y = asDate.getFullYear();
+  const m = String(asDate.getMonth() + 1).padStart(2, "0");
+  const d = String(asDate.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function safeFilename(name) {
@@ -2384,7 +2409,7 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
         <input name="last_name" value="${escapeHtml(user.last_name || "")}" required ${fieldClass} />
         <label>Fecha de nacimiento</label>
         <input name="birth_date" type="date" value="${
-          user.birth_date ? new Date(user.birth_date).toISOString().slice(0, 10) : ""
+          user.birth_date ? normalizeDateOnly(user.birth_date) : ""
         }" ${fieldClass} />
         <label>Calle</label>
         <input name="street" value="${escapeHtml(user.street || "")}" ${fieldClass} />
