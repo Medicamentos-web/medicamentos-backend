@@ -68,7 +68,7 @@ app.post("/api/billing/webhook", express.raw({ type: "application/json" }), asyn
           try {
             await mailTransport.sendMail({
               from: process.env.SMTP_USER, to: fam.rows[0].email,
-              subject: "Suscripción activada - Medicamentos",
+              subject: "Suscripción activada - MediControl",
               html: `<h2>Su suscripción ha sido activada</h2><p>Familia: ${fam.rows[0].name || familyId}</p><p>Todas las funciones están ahora disponibles.</p>`,
             });
           } catch {}
@@ -931,7 +931,7 @@ function buildCriticalMedsPdf(
       doc
         .fontSize(12)
         .text(
-          "Muchas gracias por su apoyo.\n\nAtentamente,\nEquipo de Gestion de Medicamentos"
+          "Muchas gracias por su apoyo.\n\nAtentamente,\nEquipo MediControl"
         );
       doc.end();
     } catch (error) {
@@ -1372,7 +1372,7 @@ function renderShell(req, title, active, content) {
       <body>
         <div class="app">
           <aside class="sidebar">
-            <div class="brand">ELDERCARE_V2</div>
+            <div class="brand" style="display:flex; align-items:center; gap:8px;"><div style="width:28px; height:28px; background:linear-gradient(135deg,#34d399,#06b6d4); border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:bold; font-size:13px;">M</div>MediControl</div>
             <h4>Gestión</h4>
             <nav class="nav">
               ${items
@@ -1407,7 +1407,7 @@ function renderShell(req, title, active, content) {
           <div class="main">
             <header class="topbar">
               <div style="display:flex; align-items:center; gap:8px;">
-                <div class="brand">ELDERCARE_V2</div>
+                <div class="brand" style="display:flex; align-items:center; gap:8px;"><div style="width:28px; height:28px; background:linear-gradient(135deg,#34d399,#06b6d4); border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:bold; font-size:13px;">M</div>MediControl</div>
                 <div class="breadcrumb">${escapeHtml(title)}</div>
               </div>
               <div class="search">
@@ -1645,7 +1645,7 @@ app.get("/diag", (req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
-    message: "Backend de Medicamentos Multifamiliar",
+    message: "Backend de MediControl",
     endpoints: [
       "/health",
       "/auth/register",
@@ -4645,7 +4645,7 @@ app.post("/api/feedback", requireAuth, async (req, res) => {
     `;
     if (mailTransport && u.email) {
       try {
-        await sendUserEmail(u.email, "Gracias por tu valoración – Medicamentos", userConfirmHtml);
+        await sendUserEmail(u.email, "Gracias por tu valoración – MediControl", userConfirmHtml);
       } catch (e) { console.error("[FEEDBACK] Error email user:", e.message); }
     }
 
@@ -6485,12 +6485,12 @@ async function checkTrialExpiry() {
         await mailTransport.sendMail({
           from: process.env.SMTP_USER,
           to: row.email,
-          subject: "Tu período de prueba ha finalizado – Medicamentos App",
+          subject: "Tu período de prueba ha finalizado – MediControl",
           html: `
 <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
   <div style="background:linear-gradient(135deg,#0f172a,#1e40af); color:white; padding:30px; border-radius:16px 16px 0 0; text-align:center;">
-    <h1 style="margin:0; font-size:24px;">⚕️ Medicamentos</h1>
-    <p style="margin:8px 0 0; opacity:0.8;">Gestión de medicación inteligente</p>
+    <h1 style="margin:0; font-size:24px;">⚕️ MediControl</h1>
+    <p style="margin:8px 0 0; opacity:0.8;">Ihre Medikamente. Unter Kontrolle.</p>
   </div>
   <div style="background:white; padding:30px; border:1px solid #e2e8f0; border-top:none;">
     <p>Hola <strong>${row.first_name || row.name || "usuario"}</strong>,</p>
@@ -6513,7 +6513,7 @@ async function checkTrialExpiry() {
     <hr style="border:none; border-top:1px solid #e2e8f0; margin:24px 0;">
     <h3 style="color:#0f172a; font-size:14px;">Información legal importante</h3>
     <p style="font-size:12px; color:#64748b; line-height:1.6;">
-      Medicamentos App es un servicio de software como servicio (SaaS) con domicilio en Suiza,
+      MediControl es un servicio de software como servicio (SaaS) con domicilio en Suiza,
       sujeto al derecho suizo. El servicio proporciona una herramienta digital de apoyo para la
       gestión y el recordatorio de la medicación prescrita por el médico tratante del usuario.<br><br>
       <strong>Exclusión de responsabilidad médica:</strong> Esta aplicación NO sustituye, modifica
@@ -6531,7 +6531,7 @@ async function checkTrialExpiry() {
   </div>
   <div style="background:#f8fafc; padding:16px; border-radius:0 0 16px 16px; border:1px solid #e2e8f0; border-top:none; text-align:center;">
     <p style="font-size:11px; color:#94a3b8; margin:0;">
-      © ${new Date().getFullYear()} Medicamentos App · Suiza · 
+      © ${new Date().getFullYear()} MediControl · Suiza · 
       <a href="${FRONTEND}" style="color:#2563eb;">medicamentos-app.ch</a>
     </p>
   </div>
