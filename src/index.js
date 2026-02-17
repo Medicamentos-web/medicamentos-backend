@@ -546,6 +546,28 @@ ensureDoseChangeRequests().catch((error) => {
   console.error("ERROR: No se pudo crear dose_change_requests:", error.message);
 });
 
+async function ensureFeedbackTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      family_id INTEGER REFERENCES families(id) ON DELETE SET NULL,
+      user_name VARCHAR(200),
+      user_email VARCHAR(200),
+      rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+      comment TEXT,
+      lang VARCHAR(10) DEFAULT 'es',
+      user_agent TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at DESC)");
+}
+
+ensureFeedbackTable().catch((error) => {
+  console.error("ERROR: No se pudo crear feedback:", error.message);
+});
+
 async function ensureMedicineUserScope() {
   await pool.query(
     `ALTER TABLE medicines ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE`
@@ -1257,6 +1279,8 @@ function renderShell(req, title, active, content) {
     { key: "history", label: "📁 Historial médico", href: "/admin/medical-records" },
     { key: "imports", label: "⬆ Importaciones", href: "/admin/import" },
     { key: "billing", label: "💳 Facturación", href: "/admin/billing" },
+    { key: "feedback", label: "⭐ Feedback", href: "/admin/feedback" },
+    { key: "reports", label: "📊 Informes", href: "/admin/reports" },
     { key: "settings", label: "⚙ Ajustes", href: "/admin/settings" },
   ];
   return `
@@ -4117,7 +4141,9 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
   try {
     const families = await pool.query(
       `SELECT f.id, f.name, f.subscription_status, f.trial_ends_at, f.subscription_start, f.subscription_end,
-              f.stripe_customer_id, COUNT(u.id) AS user_count
+              f.stripe_customer_id, f.stripe_subscription_id, f.max_medicines, f.trial_email_sent,
+              COUNT(u.id) AS user_count,
+              (SELECT COUNT(*) FROM medicines m WHERE m.family_id = f.id) AS med_count
        FROM families f LEFT JOIN users u ON u.family_id = f.id
        GROUP BY f.id ORDER BY f.id`
     );
@@ -4129,11 +4155,35 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
       return `<span class="badge critical">Cancelada</span>`;
     };
 
+    const fmtDate = (d) => d ? new Date(d).toLocaleDateString("de-CH", { day: "2-digit", month: "2-digit", year: "numeric" }) : "-";
+
+    const totalActive = families.rows.filter(f => f.subscription_status === "active").length;
+    const totalTrial = families.rows.filter(f => f.subscription_status === "trial").length;
+    const totalUsers = families.rows.reduce((s, f) => s + Number(f.user_count), 0);
+
     const content = `
       <div class="card">
         <h1>Facturación / Suscripciones</h1>
         <p class="muted" style="margin-bottom:16px;">Estado de pago de todas las familias registradas.</p>
-        ${stripe ? `<p style="font-size:12px; color:#059669; margin-bottom:12px;">● Stripe conectado (${STRIPE_SECRET_KEY.startsWith("sk_test") ? "MODO TEST" : "PRODUCCIÓN"})</p>` : `<p style="font-size:12px; color:#dc2626; margin-bottom:12px;">● Stripe NO configurado</p>`}
+        ${stripe ? `<p style="font-size:12px; color:#059669; margin-bottom:12px;">● Stripe conectado (${STRIPE_SECRET_KEY.startsWith("sk_test") ? "MODO TEST" : "PRODUCCIÓN"}) · Webhook ${STRIPE_WEBHOOK_SECRET ? "✓" : "✗ NO configurado"}</p>` : `<p style="font-size:12px; color:#dc2626; margin-bottom:12px;">● Stripe NO configurado</p>`}
+        <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+          <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#059669;">${totalActive}</div>
+            <div style="font-size:11px; color:#065f46;">Suscripciones activas</div>
+          </div>
+          <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#2563eb;">${totalTrial}</div>
+            <div style="font-size:11px; color:#1e40af;">En prueba</div>
+          </div>
+          <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#334155;">${families.rows.length}</div>
+            <div style="font-size:11px; color:#475569;">Familias</div>
+          </div>
+          <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#334155;">${totalUsers}</div>
+            <div style="font-size:11px; color:#475569;">Usuarios totales</div>
+          </div>
+        </div>
         <div style="overflow:auto;">
           <table class="table">
             <thead>
@@ -4142,23 +4192,29 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
                 <th>Familia</th>
                 <th>Estado</th>
                 <th>Trial expira</th>
-                <th>Suscripción inicio</th>
+                <th>Suscripción</th>
+                <th>Fin/Renovación</th>
                 <th>Usuarios</th>
-                <th>Stripe ID</th>
+                <th>Medis</th>
+                <th>Stripe</th>
               </tr>
             </thead>
             <tbody>
-              ${families.rows.map(f => `
-                <tr>
+              ${families.rows.map(f => {
+                const trialExpired = f.subscription_status === "trial" && f.trial_ends_at && new Date(f.trial_ends_at) < new Date();
+                return `
+                <tr style="${trialExpired ? "background:#fef2f2;" : ""}">
                   <td>${f.id}</td>
                   <td>${escapeHtml(f.name || "Sin nombre")}</td>
-                  <td>${statusBadge(f.subscription_status)}</td>
-                  <td>${f.trial_ends_at ? new Date(f.trial_ends_at).toLocaleDateString("es-ES") : "-"}</td>
-                  <td>${f.subscription_start ? new Date(f.subscription_start).toLocaleDateString("es-ES") : "-"}</td>
+                  <td>${statusBadge(f.subscription_status)}${trialExpired ? ' <span style="font-size:10px; color:#dc2626;">EXPIRADA</span>' : ""}</td>
+                  <td>${fmtDate(f.trial_ends_at)}${f.trial_email_sent ? ' <span style="font-size:10px; color:#059669;">✉ enviado</span>' : ""}</td>
+                  <td>${fmtDate(f.subscription_start)}</td>
+                  <td>${fmtDate(f.subscription_end)}</td>
                   <td>${f.user_count}</td>
-                  <td style="font-size:10px; word-break:break-all;">${f.stripe_customer_id ? escapeHtml(f.stripe_customer_id) : "-"}</td>
-                </tr>
-              `).join("")}
+                  <td>${f.med_count}${f.max_medicines ? `/${f.max_medicines}` : ""}</td>
+                  <td style="font-size:10px; word-break:break-all;">${f.stripe_customer_id ? `<a href="https://dashboard.stripe.com/test/customers/${f.stripe_customer_id}" target="_blank" style="color:#2563eb;">${escapeHtml(f.stripe_customer_id.slice(0, 18))}…</a>` : "-"}</td>
+                </tr>`;
+              }).join("")}
             </tbody>
           </table>
         </div>
@@ -4168,6 +4224,174 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
   } catch (err) {
     console.error("[ADMIN BILLING]", err.message);
     res.status(500).send("Error al cargar facturación");
+  }
+});
+
+// =============================================================================
+// ADMIN FEEDBACK PAGE
+// =============================================================================
+app.get("/admin/feedback", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const feedbacks = await pool.query(
+      `SELECT f.*, u.name AS current_name FROM feedback f LEFT JOIN users u ON u.id = f.user_id ORDER BY f.created_at DESC LIMIT 100`
+    );
+    const avgRating = feedbacks.rows.length > 0
+      ? (feedbacks.rows.reduce((s, f) => s + f.rating, 0) / feedbacks.rows.length).toFixed(1) : "0";
+    const starsHtml = (r) => "⭐".repeat(r) + "☆".repeat(5 - r);
+
+    const content = `
+      <div class="card">
+        <h1>⭐ Feedback de usuarios</h1>
+        <p class="muted" style="margin-bottom:16px;">${feedbacks.rows.length} valoraciones recibidas.</p>
+        <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+          <div style="background:#fffbeb; border:1px solid #fbbf24; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:28px; font-weight:bold; color:#92400e;">${avgRating}</div>
+            <div style="font-size:11px; color:#92400e;">Promedio</div>
+          </div>
+          <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#334155;">${feedbacks.rows.length}</div>
+            <div style="font-size:11px; color:#475569;">Total valoraciones</div>
+          </div>
+          ${[5,4,3,2,1].map(r => {
+            const count = feedbacks.rows.filter(f => f.rating === r).length;
+            return `<div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:8px 12px; text-align:center; min-width:80px;">
+              <div style="font-size:16px; font-weight:bold;">${count}</div>
+              <div style="font-size:10px; color:#64748b;">${"⭐".repeat(r)}</div>
+            </div>`;
+          }).join("")}
+        </div>
+        ${feedbacks.rows.length === 0 ? `<p style="color:#94a3b8; text-align:center; padding:32px;">Aún no hay valoraciones.</p>` : `
+        <div style="overflow:auto;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Usuario</th>
+                <th>Email</th>
+                <th>Familia</th>
+                <th>Valoración</th>
+                <th>Comentario</th>
+                <th>Idioma</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${feedbacks.rows.map(f => `
+                <tr>
+                  <td style="white-space:nowrap;">${new Date(f.created_at).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}</td>
+                  <td>${escapeHtml(f.user_name || f.current_name || "?")}</td>
+                  <td style="font-size:11px;">${escapeHtml(f.user_email || "-")}</td>
+                  <td>${f.family_id || "-"}</td>
+                  <td style="white-space:nowrap;">${starsHtml(f.rating)} <strong>${f.rating}/5</strong></td>
+                  <td style="max-width:300px; word-break:break-word; font-size:12px; font-style:italic;">${f.comment ? escapeHtml(f.comment) : '<span style="color:#94a3b8;">—</span>'}</td>
+                  <td>${f.lang || "es"}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>`}
+      </div>
+    `;
+    res.send(renderShell(req, "Feedback", "feedback", content));
+  } catch (err) {
+    console.error("[ADMIN FEEDBACK]", err.message);
+    res.status(500).send("Error al cargar feedback");
+  }
+});
+
+// =============================================================================
+// ADMIN REPORTS PAGE
+// =============================================================================
+app.get("/admin/reports", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const users = await pool.query(`
+      SELECT u.id, u.name, u.email, u.role, u.birth_date, u.created_at, u.last_login, u.lang, u.disclaimer_accepted_at,
+             f.name AS family_name, f.subscription_status,
+             (SELECT COUNT(*) FROM medicines m WHERE m.user_id = u.id OR (m.family_id = u.family_id AND m.user_id IS NULL)) AS med_count,
+             (SELECT COUNT(*) FROM schedules s JOIN medicines m2 ON s.medicine_id = m2.id WHERE s.user_id = u.id) AS schedule_count,
+             (SELECT MAX(dc.checked_at) FROM daily_checkouts dc WHERE dc.user_id = u.id) AS last_checkout,
+             (SELECT COUNT(*) FROM daily_checkouts dc2 WHERE dc2.user_id = u.id AND dc2.checked_at > NOW() - INTERVAL '7 days') AS checkouts_7d
+      FROM users u
+      LEFT JOIN families f ON f.id = u.family_id
+      ORDER BY u.last_login DESC NULLS LAST, u.created_at DESC
+    `);
+
+    const totalUsers = users.rows.length;
+    const activeUsers = users.rows.filter(u => u.last_login && new Date(u.last_login) > new Date(Date.now() - 7*24*60*60*1000)).length;
+    const disclaimerAccepted = users.rows.filter(u => u.disclaimer_accepted_at).length;
+    const fmtDate = (d) => d ? new Date(d).toLocaleDateString("de-CH", { day: "2-digit", month: "2-digit", year: "numeric" }) : "-";
+    const fmtDateTime = (d) => d ? new Date(d).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "-";
+
+    const content = `
+      <div class="card">
+        <h1>📊 Informes de usuarios</h1>
+        <p class="muted" style="margin-bottom:16px;">Información detallada de actividad y estado de cada usuario.</p>
+        <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+          <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#059669;">${activeUsers}</div>
+            <div style="font-size:11px; color:#065f46;">Activos (7d)</div>
+          </div>
+          <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#334155;">${totalUsers}</div>
+            <div style="font-size:11px; color:#475569;">Usuarios totales</div>
+          </div>
+          <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
+            <div style="font-size:24px; font-weight:bold; color:#2563eb;">${disclaimerAccepted}</div>
+            <div style="font-size:11px; color:#1e40af;">Disclaimer aceptado</div>
+          </div>
+        </div>
+        <div style="overflow:auto;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Nombre</th>
+                <th>Email</th>
+                <th>Rol</th>
+                <th>Familia</th>
+                <th>Suscripción</th>
+                <th>Medis</th>
+                <th>Horarios</th>
+                <th>Registrado</th>
+                <th>Último login</th>
+                <th>Tomas 7d</th>
+                <th>Última toma</th>
+                <th>Idioma</th>
+                <th>Disclaimer</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${users.rows.map(u => {
+                const isActive = u.last_login && new Date(u.last_login) > new Date(Date.now() - 7*24*60*60*1000);
+                const subBadge = u.subscription_status === "active" ? '<span class="badge info">Activa</span>'
+                  : u.subscription_status === "trial" ? '<span class="badge warn">Trial</span>'
+                  : '<span class="badge critical">Inactiva</span>';
+                return `
+                <tr style="${isActive ? "" : "opacity:0.7;"}">
+                  <td>${u.id}</td>
+                  <td><a href="/admin/user-edit/${u.id}" style="color:#2563eb; font-weight:bold;">${escapeHtml(u.name || "?")}</a></td>
+                  <td style="font-size:11px;">${escapeHtml(u.email || "-")}</td>
+                  <td style="font-size:11px;">${u.role}</td>
+                  <td style="font-size:11px;">${escapeHtml(u.family_name || "-")}</td>
+                  <td>${subBadge}</td>
+                  <td>${u.med_count}</td>
+                  <td>${u.schedule_count}</td>
+                  <td style="font-size:11px;">${fmtDate(u.created_at)}</td>
+                  <td style="font-size:11px; ${isActive ? "color:#059669; font-weight:bold;" : ""}">${fmtDateTime(u.last_login)}</td>
+                  <td style="text-align:center; ${Number(u.checkouts_7d) > 0 ? "color:#059669; font-weight:bold;" : "color:#94a3b8;"}">${u.checkouts_7d}</td>
+                  <td style="font-size:11px;">${fmtDateTime(u.last_checkout)}</td>
+                  <td>${u.lang || "es"}</td>
+                  <td>${u.disclaimer_accepted_at ? `<span style="color:#059669;">✓ ${fmtDate(u.disclaimer_accepted_at)}</span>` : '<span style="color:#dc2626;">✗</span>'}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    res.send(renderShell(req, "Informes", "reports", content));
+  } catch (err) {
+    console.error("[ADMIN REPORTS]", err.message);
+    res.status(500).send("Error al cargar informes");
   }
 });
 
@@ -4212,6 +4436,15 @@ app.post("/api/feedback", requireAuth, async (req, res) => {
         </table>
       </div>
     `;
+
+    // Save to database
+    try {
+      await pool.query(
+        `INSERT INTO feedback (user_id, family_id, user_name, user_email, rating, comment, lang, user_agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [userId, familyId, u.name || null, u.email, stars, comment || null, userLang || "es", req.headers["user-agent"] || null]
+      );
+    } catch (e) { console.error("[FEEDBACK] Error guardando en DB:", e.message); }
 
     // Send to admin
     if (mailTransport && ADMIN_EMAIL) {
