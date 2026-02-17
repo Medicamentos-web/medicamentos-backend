@@ -25,6 +25,7 @@ const app = express();
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || "";
+const STRIPE_PRICE_ID_YEARLY = process.env.STRIPE_PRICE_ID_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
@@ -4044,20 +4045,23 @@ app.get("/api/billing/status", requireAuth, async (req, res) => {
 
 // Crear sesión de Stripe Checkout
 app.post("/api/billing/create-checkout", requireAuth, async (req, res) => {
-  if (!stripe || !STRIPE_PRICE_ID) {
+  if (!stripe) {
     return res.status(400).json({ error: "Stripe no configurado. Contacte al administrador." });
+  }
+  const plan = req.body?.plan || "monthly";
+  const priceId = plan === "yearly" ? STRIPE_PRICE_ID_YEARLY : STRIPE_PRICE_ID;
+  if (!priceId) {
+    return res.status(400).json({ error: `Precio de Stripe no configurado para plan ${plan}. Contacte al administrador.` });
   }
   const familyId = Number(getFamilyId(req));
   if (!familyId) return res.status(400).json({ error: "family_id requerido" });
 
   try {
-    // Check if family already has a customer
     const fam = await pool.query(`SELECT stripe_customer_id, name FROM families WHERE id = $1`, [familyId]);
     if (!fam.rows.length) return res.status(404).json({ error: "Familia no encontrada" });
 
     let customerId = fam.rows[0].stripe_customer_id;
     if (!customerId) {
-      // Create Stripe customer
       const customer = await stripe.customers.create({
         metadata: { family_id: String(familyId) },
         name: fam.rows[0].name || `Familia ${familyId}`,
@@ -4071,18 +4075,18 @@ app.post("/api/billing/create-checkout", requireAuth, async (req, res) => {
       customer: customerId,
       payment_method_types: ["card"],
       mode: "subscription",
-      line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: 1 }],
       success_url: `${FRONTEND_URL}/billing?success=1`,
       cancel_url: `${FRONTEND_URL}/billing?cancelled=1`,
-      metadata: { family_id: String(familyId) },
+      metadata: { family_id: String(familyId), plan },
       subscription_data: { metadata: { family_id: String(familyId) } },
     });
 
-    console.log(`[STRIPE] Checkout creado para familia ${familyId}: ${session.id}`);
+    console.log(`[STRIPE] Checkout ${plan} creado para familia ${familyId}: ${session.id}`);
     res.json({ url: session.url, session_id: session.id });
   } catch (err) {
     console.error("[STRIPE CHECKOUT]", err.message);
-    res.status(500).json({ error: "Error al crear sesión de pago" });
+    res.status(500).json({ error: `Error al crear sesión: ${err.message}` });
   }
 });
 
