@@ -568,6 +568,31 @@ ensureFeedbackTable().catch((error) => {
   console.error("ERROR: No se pudo crear feedback:", error.message);
 });
 
+async function ensureLeadsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS leads (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(200),
+      email VARCHAR(200) NOT NULL,
+      phone VARCHAR(50),
+      lang VARCHAR(10) DEFAULT 'de-CH',
+      source VARCHAR(50) DEFAULT 'landing',
+      message TEXT,
+      ip VARCHAR(50),
+      user_agent TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ
+    );
+  `);
+  await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ");
+  await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_email ON leads(email)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(created_at DESC)");
+}
+
+ensureLeadsTable().catch((error) => {
+  console.error("ERROR: No se pudo crear leads:", error.message);
+});
+
 async function ensureMedicineUserScope() {
   await pool.query(
     `ALTER TABLE medicines ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE`
@@ -1280,6 +1305,7 @@ function renderShell(req, title, active, content) {
     { key: "imports", label: "⬆ Importaciones", href: "/admin/import" },
     { key: "billing", label: "💳 Facturación", href: "/admin/billing" },
     { key: "feedback", label: "⭐ Feedback", href: "/admin/feedback" },
+    { key: "leads", label: "📩 Leads", href: "/admin/leads" },
     { key: "reports", label: "📊 Informes", href: "/admin/reports" },
     { key: "settings", label: "⚙ Ajustes", href: "/admin/settings" },
   ];
@@ -4257,6 +4283,125 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
   } catch (err) {
     console.error("[ADMIN BILLING]", err.message);
     res.status(500).send("Error al cargar facturación");
+  }
+});
+
+// =============================================================================
+// LEADS (Landing page signups) - PUBLIC endpoint, no auth required
+// =============================================================================
+app.post("/api/leads", async (req, res) => {
+  const { name, email, phone, lang, message, source } = req.body || {};
+  if (!email || !email.includes("@")) return res.status(400).json({ error: "Email inválido" });
+
+  try {
+    await pool.query(
+      `INSERT INTO leads (name, email, phone, lang, source, message, ip, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (email) DO UPDATE SET name = COALESCE(EXCLUDED.name, leads.name), phone = COALESCE(EXCLUDED.phone, leads.phone), updated_at = NOW()`,
+      [name || null, email.trim().toLowerCase(), phone || null, lang || "de-CH", source || "landing", message || null,
+       req.headers["x-forwarded-for"] || req.ip || null, req.headers["user-agent"] || null]
+    );
+
+    // Send welcome email
+    if (mailTransport) {
+      const welcomeHtml = `
+        <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+          <div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%); border-radius:16px; padding:32px; text-align:center; margin-bottom:24px;">
+            <h1 style="color:#34d399; font-size:28px; margin:0;">MediControl</h1>
+            <p style="color:#94a3b8; font-size:14px; margin-top:8px;">Ihre Medikamente. Unter Kontrolle.</p>
+          </div>
+          <h2 style="color:#0f172a;">Vielen Dank für Ihr Interesse! / ¡Gracias por tu interés!</h2>
+          <p style="color:#475569; font-size:14px;">Wir haben Ihre Anfrage erhalten. Sie werden benachrichtigt, sobald die App verfügbar ist.</p>
+          <p style="color:#475569; font-size:14px;">Hemos recibido su solicitud. Le notificaremos cuando la app esté disponible.</p>
+          <div style="background:#f8fafc; border-radius:12px; padding:20px; margin:20px 0; text-align:center;">
+            <p style="font-size:16px; font-weight:bold; color:#0f172a;">Kostenlose 7-Tage-Testversion / Prueba gratuita de 7 días</p>
+            <a href="${FRONTEND_URL}" style="display:inline-block; background:#007AFF; color:white; text-decoration:none; padding:12px 32px; border-radius:12px; font-weight:bold; margin-top:12px;">Jetzt testen / Probar ahora</a>
+          </div>
+          <p style="color:#94a3b8; font-size:11px; text-align:center;">SaaS-Service nach Schweizer Recht. © ${new Date().getFullYear()} MediControl</p>
+        </div>`;
+      try {
+        await mailTransport.sendMail({
+          from: process.env.SMTP_USER, to: email.trim(),
+          subject: "Willkommen bei MediControl / Bienvenido a MediControl",
+          html: welcomeHtml,
+        });
+      } catch (e) { console.error("[LEADS] Email error:", e.message); }
+    }
+
+    // Notify admin
+    if (mailTransport && ADMIN_EMAIL) {
+      try {
+        await sendAdminAlertEmail(`Nuevo lead: ${name || email}`,
+          `<p><strong>Nombre:</strong> ${escapeHtml(name || "-")}</p>
+           <p><strong>Email:</strong> ${escapeHtml(email)}</p>
+           <p><strong>Teléfono:</strong> ${escapeHtml(phone || "-")}</p>
+           <p><strong>Idioma:</strong> ${lang || "de-CH"}</p>
+           <p><strong>Mensaje:</strong> ${escapeHtml(message || "-")}</p>
+           <p><strong>Fuente:</strong> ${source || "landing"}</p>`);
+      } catch {}
+    }
+
+    console.log(`[LEAD] Nuevo: ${email} (${name || "?"}) via ${source || "landing"}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[LEADS]", err.message);
+    res.status(500).json({ error: "Error al registrar" });
+  }
+});
+
+// Admin: ver leads
+app.get("/admin/leads", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const leads = await pool.query(`SELECT * FROM leads ORDER BY created_at DESC LIMIT 500`);
+    const total = leads.rows.length;
+    const today = leads.rows.filter(l => new Date(l.created_at).toDateString() === new Date().toDateString()).length;
+    const week = leads.rows.filter(l => new Date(l.created_at) > new Date(Date.now() - 7*24*60*60*1000)).length;
+
+    const content = `
+      <div class="card">
+        <h1>📩 Leads / Interesados</h1>
+        <p class="muted" style="margin-bottom:16px;">Registros desde la landing page y otras fuentes.</p>
+        <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+          <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#059669;">${total}</div>
+            <div style="font-size:11px; color:#065f46;">Total</div>
+          </div>
+          <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#2563eb;">${week}</div>
+            <div style="font-size:11px; color:#1e40af;">Esta semana</div>
+          </div>
+          <div style="background:#fffbeb; border:1px solid #fbbf24; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#92400e;">${today}</div>
+            <div style="font-size:11px; color:#92400e;">Hoy</div>
+          </div>
+        </div>
+        ${leads.rows.length === 0 ? `<p style="color:#94a3b8; text-align:center; padding:32px;">Aún no hay leads.</p>` : `
+        <div style="overflow:auto;">
+          <table class="table">
+            <thead>
+              <tr><th>Fecha</th><th>Nombre</th><th>Email</th><th>Teléfono</th><th>Idioma</th><th>Fuente</th><th>Mensaje</th></tr>
+            </thead>
+            <tbody>
+              ${leads.rows.map(l => `
+                <tr>
+                  <td style="white-space:nowrap; font-size:11px;">${new Date(l.created_at).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                  <td style="font-weight:bold;">${escapeHtml(l.name || "-")}</td>
+                  <td style="font-size:12px;"><a href="mailto:${escapeHtml(l.email)}" style="color:#2563eb;">${escapeHtml(l.email)}</a></td>
+                  <td style="font-size:12px;">${escapeHtml(l.phone || "-")}</td>
+                  <td>${l.lang || "-"}</td>
+                  <td style="font-size:11px;">${escapeHtml(l.source || "-")}</td>
+                  <td style="max-width:200px; font-size:11px; word-break:break-word;">${l.message ? escapeHtml(l.message) : "-"}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>`}
+      </div>
+    `;
+    res.send(renderShell(req, "Leads", "leads", content));
+  } catch (err) {
+    console.error("[ADMIN LEADS]", err.message);
+    res.status(500).send("Error al cargar leads");
   }
 });
 
