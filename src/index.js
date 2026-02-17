@@ -1920,24 +1920,78 @@ app.get("/admin/login", (_req, res) => {
     const errorMessage = _req.query?.error
       ? "Credenciales inválidas. Intenta nuevamente."
       : "";
-    const fieldClass = 'class="form-control"';
-    const content = `
-      <div class="card" style="max-width:420px; margin:0 auto;">
-        <h1>Acceso administrador</h1>
-        <p class="muted" style="font-size:12px;">Inicia sesión para ver el dashboard del backend.</p>
-        ${errorMessage ? `<div style="margin-top:12px; font-size:13px; color:#b91c1c;">${errorMessage}</div>` : ""}
+    const html = `<!doctype html>
+    <html lang="de">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>MediControl – Admin</title>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+          min-height: 100vh;
+          background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+          display: flex; align-items: center; justify-content: center;
+          font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+          padding: 24px;
+        }
+        .login-card {
+          width: 100%; max-width: 400px; text-align: center;
+        }
+        .logo {
+          width: 64px; height: 64px; border-radius: 16px;
+          background: linear-gradient(135deg, #34d399, #06b6d4);
+          display: flex; align-items: center; justify-content: center;
+          margin: 0 auto 16px; box-shadow: 0 8px 24px rgba(52,211,153,0.3);
+        }
+        .logo span { color: #fff; font-weight: 800; font-size: 28px; }
+        h1 { color: #fff; font-size: 24px; font-weight: 700; }
+        .subtitle { color: #94a3b8; font-size: 13px; margin-top: 4px; }
+        .badge { display: inline-block; background: rgba(52,211,153,0.15); color: #34d399; font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 20px; margin-top: 12px; border: 1px solid rgba(52,211,153,0.2); }
+        .error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); color: #f87171; font-size: 13px; padding: 10px 14px; border-radius: 12px; margin-top: 20px; }
+        form { margin-top: 28px; text-align: left; }
+        label { display: block; color: #94a3b8; font-size: 11px; font-weight: 600; margin-bottom: 6px; margin-top: 16px; text-transform: uppercase; letter-spacing: 0.05em; }
+        input[type="text"], input[type="email"], input[type="password"] {
+          width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(100,116,139,0.3);
+          border-radius: 12px; padding: 12px 14px; font-size: 14px; color: #fff;
+          outline: none; transition: border-color 0.2s;
+        }
+        input:focus { border-color: #34d399; }
+        input::placeholder { color: #475569; }
+        button[type="submit"] {
+          width: 100%; margin-top: 24px; padding: 14px;
+          background: linear-gradient(135deg, #34d399, #06b6d4);
+          color: #fff; font-weight: 700; font-size: 14px; border: none;
+          border-radius: 12px; cursor: pointer; transition: opacity 0.2s;
+          box-shadow: 0 4px 16px rgba(52,211,153,0.25);
+        }
+        button[type="submit"]:hover { opacity: 0.9; }
+        .footer { margin-top: 24px; color: #475569; font-size: 10px; }
+        .footer a { color: #64748b; text-decoration: none; }
+        .footer a:hover { color: #94a3b8; }
+      </style>
+    </head>
+    <body>
+      <div class="login-card">
+        <div class="logo"><span>M</span></div>
+        <h1>MediControl</h1>
+        <p class="subtitle">Admin Panel · Ihre Medikamente. Unter Kontrolle.</p>
+        <span class="badge">🇨🇭 Swiss Healthcare SaaS</span>
+        ${errorMessage ? `<div class="error">${errorMessage}</div>` : ""}
         <form method="POST" action="/admin/login">
           <label>Family ID</label>
-          <input name="family_id" placeholder="1" required ${fieldClass} />
+          <input name="family_id" type="text" placeholder="1" required value="1" />
           <label>Email</label>
-          <input name="email" type="email" placeholder="admin@mail.com" required ${fieldClass} />
+          <input name="email" type="email" placeholder="admin@medicontrol.app" required />
           <label>Password</label>
-          <input name="password" type="password" placeholder="******" required ${fieldClass} />
-          <button class="btn primary" type="submit" style="width:100%; margin-top:18px;">Entrar</button>
+          <input name="password" type="password" placeholder="••••••" required />
+          <button type="submit">Anmelden</button>
         </form>
+        <p class="footer">© ${new Date().getFullYear()} MediControl · <a href="/">Zurück zur App</a></p>
       </div>
-    `;
-    res.send(renderShell(_req, "Acceso Admin", "", content));
+    </body>
+    </html>`;
+    res.send(html);
   } catch (error) {
     console.error("[ADMIN LOGIN GET] Error:", error.message, error.stack);
     res.status(500).send(`<html><body><h2>Error en login page</h2><pre>${error.message}\n${error.stack}</pre><a href="/diag">Ver diagnóstico</a></body></html>`);
