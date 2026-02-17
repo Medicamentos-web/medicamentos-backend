@@ -4136,6 +4136,35 @@ app.post("/api/billing/portal", requireAuth, async (req, res) => {
   }
 });
 
+// Admin: sincronizar suscripción con Stripe
+app.post("/admin/billing/sync/:familyId", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const familyId = Number(req.params.familyId);
+  if (!stripe) return res.redirect("/admin/billing?msg=Stripe+no+configurado");
+  try {
+    const fam = await pool.query(`SELECT stripe_customer_id FROM families WHERE id = $1`, [familyId]);
+    if (!fam.rows[0]?.stripe_customer_id) return res.redirect("/admin/billing?msg=Sin+customer+Stripe");
+
+    const subs = await stripe.subscriptions.list({ customer: fam.rows[0].stripe_customer_id, limit: 1 });
+    if (subs.data.length > 0) {
+      const sub = subs.data[0];
+      const status = (sub.status === "active" || sub.status === "trialing") ? "active" : sub.status === "past_due" ? "past_due" : "cancelled";
+      const endDate = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
+      const startDate = sub.current_period_start ? new Date(sub.current_period_start * 1000) : null;
+      await pool.query(
+        `UPDATE families SET subscription_status = $1, subscription_start = $2, subscription_end = $3, stripe_subscription_id = $4 WHERE id = $5`,
+        [status, startDate, endDate, sub.id, familyId]
+      );
+      console.log(`[ADMIN SYNC] Familia ${familyId} sincronizada: ${status} hasta ${endDate}`);
+      return res.redirect(`/admin/billing?msg=Familia+${familyId}+sincronizada:+${status}`);
+    } else {
+      return res.redirect(`/admin/billing?msg=Familia+${familyId}:+sin+suscripción+en+Stripe`);
+    }
+  } catch (err) {
+    console.error("[ADMIN SYNC]", err.message);
+    return res.redirect(`/admin/billing?msg=Error:+${encodeURIComponent(err.message)}`);
+  }
+});
+
 // Admin: ver billing de todas las familias
 app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   try {
@@ -4161,10 +4190,12 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
     const totalTrial = families.rows.filter(f => f.subscription_status === "trial").length;
     const totalUsers = families.rows.reduce((s, f) => s + Number(f.user_count), 0);
 
+    const msg = req.query.msg || "";
     const content = `
       <div class="card">
         <h1>Facturación / Suscripciones</h1>
         <p class="muted" style="margin-bottom:16px;">Estado de pago de todas las familias registradas.</p>
+        ${msg ? `<div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:8px; padding:10px 14px; margin-bottom:12px; font-size:13px; color:#1e40af;">${escapeHtml(msg)}</div>` : ""}
         ${stripe ? `<p style="font-size:12px; color:#059669; margin-bottom:12px;">● Stripe conectado (${STRIPE_SECRET_KEY.startsWith("sk_test") ? "MODO TEST" : "PRODUCCIÓN"}) · Webhook ${STRIPE_WEBHOOK_SECRET ? "✓" : "✗ NO configurado"}</p>` : `<p style="font-size:12px; color:#dc2626; margin-bottom:12px;">● Stripe NO configurado</p>`}
         <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
           <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:12px 16px; text-align:center; min-width:120px;">
@@ -4197,6 +4228,7 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
                 <th>Usuarios</th>
                 <th>Medis</th>
                 <th>Stripe</th>
+                <th>Acción</th>
               </tr>
             </thead>
             <tbody>
@@ -4213,6 +4245,7 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
                   <td>${f.user_count}</td>
                   <td>${f.med_count}${f.max_medicines ? `/${f.max_medicines}` : ""}</td>
                   <td style="font-size:10px; word-break:break-all;">${f.stripe_customer_id ? `<a href="https://dashboard.stripe.com/test/customers/${f.stripe_customer_id}" target="_blank" style="color:#2563eb;">${escapeHtml(f.stripe_customer_id.slice(0, 18))}…</a>` : "-"}</td>
+                  <td>${f.stripe_customer_id ? `<form method="POST" action="/admin/billing/sync/${f.id}" style="margin:0;"><button type="submit" style="font-size:11px; background:#2563eb; color:white; border:none; padding:4px 10px; border-radius:6px; cursor:pointer;">🔄 Sync</button></form>` : "-"}</td>
                 </tr>`;
               }).join("")}
             </tbody>
