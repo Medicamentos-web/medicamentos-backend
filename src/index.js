@@ -5663,8 +5663,147 @@ app.post("/admin/dose-requests/:id/reject", requireRoleHtml(["admin", "superuser
 app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) => {
   const emergency = req.query?.emergency === "1";
   const content = `
+    <style>
+      .link-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
+      .link-card { display:flex; align-items:center; gap:12px; padding:14px 16px; border:1px solid var(--border); border-radius:14px; transition:all .15s; background:#fff; }
+      .link-card:hover { border-color:var(--accent); box-shadow:0 4px 12px -6px rgba(37,99,235,.2); transform:translateY(-1px); }
+      .link-icon { width:40px; height:40px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; }
+      .link-meta { flex:1; min-width:0; }
+      .link-meta h3 { margin:0; font-size:14px; font-weight:600; }
+      .link-meta p { margin:2px 0 0; font-size:11px; color:var(--muted); }
+      .section-title { font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:24px 0 8px; }
+    </style>
+
+    <!-- Links de Soporte y Plataformas -->
     <div class="card">
-      <h1>Ajustes</h1>
+      <h1>🔗 Soporte y plataformas</h1>
+      <p class="muted" style="font-size:13px; margin-top:6px;">Acceso rápido a todos los servicios del proyecto MediControl.</p>
+
+      <div class="section-title">🚀 Despliegue y hosting</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://vercel.com/medicamentos-webs-projects" target="_blank">
+          <div class="link-icon" style="background:#000; color:#fff;">▲</div>
+          <div class="link-meta">
+            <h3>Vercel Dashboard</h3>
+            <p>Frontend · Deployments · Logs · Analytics</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app" target="_blank">
+          <div class="link-icon" style="background:#10b981; color:#fff;">🌐</div>
+          <div class="link-meta">
+            <h3>App en producción</h3>
+            <p>medicamentos-frontend.vercel.app</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app/landing" target="_blank">
+          <div class="link-icon" style="background:#6366f1; color:#fff;">📄</div>
+          <div class="link-meta">
+            <h3>Landing Page</h3>
+            <p>Página de presentación multiidioma</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title">💻 Código fuente</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://github.com/Medicamentos-web/medicamentos-frontend" target="_blank">
+          <div class="link-icon" style="background:#24292e; color:#fff;">🐙</div>
+          <div class="link-meta">
+            <h3>GitHub — Frontend</h3>
+            <p>Repositorio Next.js · Commits · PRs · Issues</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title">🛠️ Backend y base de datos</div>
+      <div class="link-grid">
+        <a class="link-card" href="/dashboard">
+          <div class="link-icon" style="background:#2563eb; color:#fff;">🏠</div>
+          <div class="link-meta">
+            <h3>Panel Admin</h3>
+            <p>Dashboard de administración del backend</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/import">
+          <div class="link-icon" style="background:#f59e0b; color:#fff;">⬆</div>
+          <div class="link-meta">
+            <h3>Importar medicamentos</h3>
+            <p>PDF · Imagen · OCR · Escaneo</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/import-scan">
+          <div class="link-icon" style="background:#06b6d4; color:#fff;">📷</div>
+          <div class="link-meta">
+            <h3>Escanear imagen</h3>
+            <p>OCR desde foto de etiqueta</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/meds-list">
+          <div class="link-icon" style="background:#8b5cf6; color:#fff;">💊</div>
+          <div class="link-meta">
+            <h3>Lista de medicamentos</h3>
+            <p>Ver y gestionar inventario</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/billing">
+          <div class="link-icon" style="background:#ec4899; color:#fff;">💳</div>
+          <div class="link-meta">
+            <h3>Facturación</h3>
+            <p>Planes · Suscripciones · Trial</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/reports">
+          <div class="link-icon" style="background:#14b8a6; color:#fff;">📊</div>
+          <div class="link-meta">
+            <h3>Informes</h3>
+            <p>Estadísticas de uso y adherencia</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/feedback">
+          <div class="link-icon" style="background:#eab308; color:#fff;">⭐</div>
+          <div class="link-meta">
+            <h3>Feedback</h3>
+            <p>Valoraciones de los usuarios</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/leads">
+          <div class="link-icon" style="background:#f97316; color:#fff;">📩</div>
+          <div class="link-meta">
+            <h3>Leads</h3>
+            <p>Registros desde landing page</p>
+          </div>
+        </a>
+        <a class="link-card" href="/health" target="_blank">
+          <div class="link-icon" style="background:#22c55e; color:#fff;">💚</div>
+          <div class="link-meta">
+            <h3>Health Check</h3>
+            <p>Estado del backend y base de datos</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title">📱 App móvil</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app/promo" target="_blank">
+          <div class="link-icon" style="background:#7c3aed; color:#fff;">🎬</div>
+          <div class="link-meta">
+            <h3>Video Promo</h3>
+            <p>Página de grabación de pantalla</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app/billing" target="_blank">
+          <div class="link-icon" style="background:#dc2626; color:#fff;">💰</div>
+          <div class="link-meta">
+            <h3>Planes y precios</h3>
+            <p>Vista del usuario de suscripciones</p>
+          </div>
+        </a>
+      </div>
+    </div>
+
+    <!-- Ajustes avanzados -->
+    <div class="card" style="margin-top:16px;">
+      <h1>⚙ Ajustes avanzados</h1>
       <p class="muted" style="font-size:13px; margin-top:6px;">Opciones avanzadas desactivadas por defecto.</p>
       <form method="GET" action="/admin/settings">
         <label style="display:flex; align-items:center; gap:10px; margin-top:12px; font-size:13px;">
@@ -6302,14 +6441,20 @@ app.post(
       return res.status(400).json({ error: "family_id, user_id y file son requeridos" });
     }
     try {
+      // Manual entry or fast import (no OCR)
+      const manualName = req.body?.manual_name;
       if (fastImport && !fastImportOcr && !debugOcr) {
+        const medName = manualName?.trim() || "Medicamento escaneado";
+        const medDosage = req.body?.manual_dosage?.trim() || "N/A";
+        const medQty = parseInt(req.body?.manual_qty, 10) || 0;
+        const medExpiry = req.body?.manual_expiry?.trim() || null;
         const medResult = await upsertMedicineForUser({
           familyId,
           userId,
-          name: "Medicamento escaneado",
-          dosage: "N/A",
-          qty: 0,
-          expiryDate: null,
+          name: medName,
+          dosage: medDosage,
+          qty: medQty,
+          expiryDate: medExpiry || null,
           batchId: null,
         });
         await ensureDefaultScheduleForMedicine({
@@ -6321,7 +6466,7 @@ app.post(
           ok: true,
           action: medResult.action,
           medicine_id: medResult.id,
-          extracted: { name: "Medicamento escaneado", dosage: "N/A", qty: 0 },
+          extracted: { name: medName, dosage: medDosage, qty: medQty },
         });
       }
       const userResult = await pool.query(
