@@ -3520,7 +3520,7 @@ app.post("/api/schedules", requireRole(["admin", "superuser"]), async (req, res)
   }
 });
 
-app.put("/api/schedules/:id", requireRole(["admin", "superuser"]), async (req, res) => {
+app.put("/api/schedules/:id", requireRole(["admin", "superuser", "user"]), async (req, res) => {
   const familyId = getFamilyId(req);
   const id = Number(req.params.id);
   const { medicine_id, user_id, dose_time, frequency, start_date, end_date } = req.body || {};
@@ -3528,6 +3528,9 @@ app.put("/api/schedules/:id", requireRole(["admin", "superuser"]), async (req, r
     return res.status(400).json({
       error: "family_id, medicine_id, user_id, dose_time y frequency son requeridos",
     });
+  }
+  if (req.user.role === "user" && req.user.sub !== Number(user_id)) {
+    return res.status(403).json({ error: "solo puedes editar tus propias programaciones" });
   }
   try {
     const schedule = await pool.query(
