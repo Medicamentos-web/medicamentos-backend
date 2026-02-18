@@ -3383,7 +3383,7 @@ app.post("/api/medicines", requireRole(["admin", "superuser"]), async (req, res)
   }
 });
 
-app.put("/api/medicines/:id", requireRole(["admin", "superuser"]), async (req, res) => {
+app.put("/api/medicines/:id", requireRole(["admin", "superuser", "user"]), async (req, res) => {
   const familyId = getFamilyId(req);
   const id = Number(req.params.id);
   const { name, dosage, current_stock, expiration_date, user_id } = req.body || {};
@@ -3396,6 +3396,9 @@ app.put("/api/medicines/:id", requireRole(["admin", "superuser"]), async (req, r
   }
   if (!Number.isFinite(id)) {
     return res.status(400).json({ error: "id inválido" });
+  }
+  if (req.user.role === "user" && req.user.sub !== userId) {
+    return res.status(403).json({ error: "solo puedes editar tus propios medicamentos" });
   }
 
   try {
@@ -3677,11 +3680,13 @@ app.get("/api/meds-by-date", requireAuth, async (req, res) => {
     const result = await pool.query(
       `SELECT
        s.id AS schedule_id,
+       m.id AS medicine_id,
        s.dose_time,
        s.frequency,
        m.name AS medicine_name,
        m.dosage,
        m.current_stock,
+       m.expiration_date,
        s.days_of_week,
        dcr.requested_dosage,
        dcr.effective_date,
@@ -3719,11 +3724,13 @@ app.get("/api/meds-by-date", requireAuth, async (req, res) => {
 
     const data = result.rows.map((row) => ({
       id: row.schedule_id,
+      medicine_id: row.medicine_id,
       nombre: row.medicine_name,
       dosis: row.dosage,
       frecuencia: row.frequency,
       hora: row.dose_time,
       stock: row.current_stock,
+      caducidad: row.expiration_date || null,
       estado: row.last_status === "taken" ? "tomado" : "pendiente",
       pending_dose: row.requested_dosage ? true : false,
       requested_dosage: row.requested_dosage || null,
@@ -6817,7 +6824,8 @@ app.post(
           action: medResult.action,
           medicine_id: medResult.id,
           extracted: { name: nameCandidate, dosage, qty },
-          detected_text_full: debugOcr ? text || "" : undefined,
+          detected_text: detectedText,
+          detected_text_full: text || "",
         });
       }
       let validatedByBirthDate = false;
@@ -6857,7 +6865,8 @@ app.post(
         medicine_id: medResult.id,
         extracted: { name: nameLine, dosage, qty },
         validated_by_birth_date: validatedByBirthDate,
-        detected_text_full: debugOcr ? text || "" : undefined,
+        detected_text: detectedText,
+        detected_text_full: text || "",
       });
     } catch (error) {
       res.status(500).json({ error: error.message });
