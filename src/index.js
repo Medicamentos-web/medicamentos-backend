@@ -6030,13 +6030,13 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
             <p>Pendiente de crear</p>
           </div>
         </span>
-        <span class="link-card" style="opacity:0.5; cursor:default;">
+        <a class="link-card" href="https://www.indiehackers.com/medicontrol" target="_blank">
           <div class="link-icon" style="background:#4799eb; color:#fff;">💡</div>
           <div class="link-meta">
             <h3>Indie Hackers</h3>
-            <p>Pendiente de crear</p>
+            <p>@medicontrol · Activo</p>
           </div>
-        </span>
+        </a>
         <span class="link-card" style="opacity:0.5; cursor:default;">
           <div class="link-icon" style="background:#ff6600; color:#fff;">🔶</div>
           <div class="link-meta">
