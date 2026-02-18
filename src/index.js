@@ -5662,7 +5662,10 @@ app.post("/admin/dose-requests/:id/reject", requireRoleHtml(["admin", "superuser
 
 app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) => {
   const emergency = req.query?.emergency === "1";
+  const settingsMsg = req.query?.msg || "";
   const content = `
+    ${settingsMsg === "snapshot_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Snapshot creado correctamente.</p></div>' : ""}
+    ${settingsMsg === "restored" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Base de datos restaurada correctamente desde backup.</p></div>' : ""}
     <style>
       .link-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
       .link-card { display:flex; align-items:center; gap:12px; padding:14px 16px; border:1px solid var(--border); border-radius:14px; transition:all .15s; background:#fff; }
@@ -5801,6 +5804,46 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
       </div>
     </div>
 
+    <!-- Backup / Snapshot / Restore -->
+    <div class="card" style="margin-top:16px;">
+      <h1>💾 Backup y restauración</h1>
+      <p class="muted" style="font-size:13px; margin-top:6px;">Exporta un backup completo de la base de datos o restaura desde un archivo JSON.</p>
+
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:16px;">
+        <a class="btn primary" href="/admin/backup/full" style="gap:6px;">⬇ Backup completo (JSON)</a>
+        <a class="btn outline" href="/admin/backup/medicines" style="gap:6px;">💊 Solo medicamentos</a>
+        <a class="btn outline" href="/admin/backup/schedules" style="gap:6px;">🕐 Solo horarios</a>
+        <a class="btn outline" href="/admin/backup/users" style="gap:6px;">👤 Solo usuarios</a>
+      </div>
+
+      <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+        <h2 style="font-size:16px; margin:0 0 8px;">📸 Crear snapshot</h2>
+        <p class="muted" style="font-size:12px;">Guarda el estado actual de la base de datos internamente. Puedes restaurar desde aquí si algo sale mal.</p>
+        <form method="POST" action="/admin/backup/snapshot" style="margin-top:10px;">
+          <input name="description" placeholder="Descripción (ej: Antes de importar nuevo PDF)" class="form-control" style="max-width:400px;" />
+          <button class="btn primary" type="submit" style="margin-top:8px;">📸 Crear snapshot ahora</button>
+        </form>
+      </div>
+
+      <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+        <h2 style="font-size:16px; margin:0 0 8px;">♻️ Restaurar desde archivo</h2>
+        <p class="muted" style="font-size:12px;">Sube un archivo JSON de backup para restaurar la base de datos. ⚠️ Esto reemplazará los datos actuales.</p>
+        <form method="POST" action="/admin/backup/restore" enctype="multipart/form-data" style="margin-top:10px;">
+          <input name="file" type="file" accept=".json" class="form-control" style="max-width:400px;" />
+          <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:12px;">
+            <input type="checkbox" name="confirm" value="1" />
+            Confirmo que quiero reemplazar los datos actuales
+          </label>
+          <button class="btn primary" type="submit" style="margin-top:8px; background:var(--danger);">♻️ Restaurar backup</button>
+        </form>
+      </div>
+
+      <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+        <h2 style="font-size:16px; margin:0 0 8px;">📋 Snapshots guardados</h2>
+        <a class="btn outline" href="/admin/backup/snapshots">Ver snapshots guardados</a>
+      </div>
+    </div>
+
     <!-- Ajustes avanzados -->
     <div class="card" style="margin-top:16px;">
       <h1>⚙ Ajustes avanzados</h1>
@@ -5820,6 +5863,273 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
   `;
   res.send(renderShell(req, "Ajustes", "settings", content));
 });
+
+// =============================================================================
+// BACKUP / SNAPSHOT / RESTORE
+// =============================================================================
+
+const BACKUP_TABLES = [
+  "families", "users", "medicines", "schedules", "dose_logs", "alerts",
+  "import_batches", "deletion_logs", "medical_records", "dose_change_requests",
+  "feedback", "leads", "doctors", "family_doctors", "push_subscriptions",
+  "medicine_audits", "weekly_reminders", "daily_checkouts", "password_resets",
+];
+
+async function exportTables(familyId, tableNames) {
+  const data = { _meta: { version: 1, exported_at: new Date().toISOString(), family_id: familyId } };
+  for (const table of tableNames) {
+    try {
+      const hasFamilyId = (await pool.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND column_name = 'family_id'`, [table]
+      )).rows.length > 0;
+      const result = hasFamilyId
+        ? await pool.query(`SELECT * FROM ${table} WHERE family_id = $1 ORDER BY id`, [familyId])
+        : await pool.query(`SELECT * FROM ${table} ORDER BY id`);
+      data[table] = result.rows;
+    } catch (err) {
+      data[table] = { error: err.message };
+    }
+  }
+  return data;
+}
+
+// Full backup (JSON download)
+app.get("/admin/backup/full", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    const data = await exportTables(familyId, BACKUP_TABLES);
+    const filename = `medicontrol_backup_${familyId}_${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/json");
+    res.send(JSON.stringify(data, null, 2));
+  } catch (err) {
+    res.status(500).send(renderShell(req, "Error", "settings", `<div class="card"><h1>Error</h1><p>${escapeHtml(err.message)}</p><a class="btn outline" href="/admin/settings">Volver</a></div>`));
+  }
+});
+
+// Partial backups
+app.get("/admin/backup/medicines", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    const data = await exportTables(familyId, ["medicines", "schedules", "dose_logs"]);
+    const filename = `medicontrol_medicines_${familyId}_${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/json");
+    res.send(JSON.stringify(data, null, 2));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/backup/schedules", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    const data = await exportTables(familyId, ["schedules", "dose_logs"]);
+    const filename = `medicontrol_schedules_${familyId}_${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/json");
+    res.send(JSON.stringify(data, null, 2));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/backup/users", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    const data = await exportTables(familyId, ["users", "doctors", "family_doctors"]);
+    const filename = `medicontrol_users_${familyId}_${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/json");
+    res.send(JSON.stringify(data, null, 2));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Snapshot: save current state internally
+app.post("/admin/backup/snapshot", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    const description = (req.body?.description || "").trim() || "Snapshot manual";
+    const data = await exportTables(familyId, BACKUP_TABLES);
+    await pool.query(`CREATE TABLE IF NOT EXISTS db_snapshots (
+      id SERIAL PRIMARY KEY, family_id INTEGER NOT NULL, description TEXT,
+      snapshot JSONB NOT NULL, created_by INTEGER, created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    await pool.query(
+      `INSERT INTO db_snapshots (family_id, description, snapshot, created_by) VALUES ($1, $2, $3, $4)`,
+      [familyId, description, JSON.stringify(data), req.user.sub]
+    );
+    res.redirect("/admin/settings?msg=snapshot_ok");
+  } catch (err) {
+    res.status(500).send(renderShell(req, "Error", "settings", `<div class="card"><h1>Error al crear snapshot</h1><p>${escapeHtml(err.message)}</p><a class="btn outline" href="/admin/settings">Volver</a></div>`));
+  }
+});
+
+// List snapshots
+app.get("/admin/backup/snapshots", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    await pool.query(`CREATE TABLE IF NOT EXISTS db_snapshots (
+      id SERIAL PRIMARY KEY, family_id INTEGER NOT NULL, description TEXT,
+      snapshot JSONB NOT NULL, created_by INTEGER, created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    const snapshots = await pool.query(
+      `SELECT s.id, s.description, s.created_at, u.name AS created_by_name
+       FROM db_snapshots s LEFT JOIN users u ON u.id = s.created_by
+       WHERE s.family_id = $1 ORDER BY s.created_at DESC LIMIT 50`,
+      [familyId]
+    );
+    const content = `
+      <div class="card">
+        <h1>📋 Snapshots guardados</h1>
+        <p class="muted" style="font-size:13px;">Restaura cualquier snapshot para volver a un estado anterior.</p>
+        ${snapshots.rows.length === 0 ? '<p class="empty" style="margin-top:16px;">No hay snapshots guardados.</p>' : `
+        <div style="margin-top:16px; overflow:auto;">
+          <table class="table">
+            <thead><tr><th>ID</th><th>Descripción</th><th>Creado por</th><th>Fecha</th><th>Acciones</th></tr></thead>
+            <tbody>
+            ${snapshots.rows.map(s => `<tr>
+              <td>${s.id}</td>
+              <td>${escapeHtml(s.description || "-")}</td>
+              <td>${escapeHtml(s.created_by_name || "-")}</td>
+              <td>${new Date(s.created_at).toLocaleString("de-CH")}</td>
+              <td style="display:flex; gap:6px;">
+                <a class="btn outline" href="/admin/backup/snapshot-download/${s.id}" style="font-size:11px;">⬇ Descargar</a>
+                <form method="POST" action="/admin/backup/snapshot-restore/${s.id}" onsubmit="return confirm('¿Restaurar este snapshot? Se reemplazarán los datos actuales.')">
+                  <button class="btn outline" type="submit" style="font-size:11px; color:var(--danger);">♻️ Restaurar</button>
+                </form>
+              </td>
+            </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>`}
+        <div style="margin-top:16px;"><a class="btn outline" href="/admin/settings">← Volver a ajustes</a></div>
+      </div>`;
+    res.send(renderShell(req, "Snapshots", "settings", content));
+  } catch (err) {
+    res.status(500).send(renderShell(req, "Error", "settings", `<div class="card"><h1>Error</h1><p>${escapeHtml(err.message)}</p></div>`));
+  }
+});
+
+// Download a snapshot
+app.get("/admin/backup/snapshot-download/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    const snap = await pool.query(`SELECT snapshot, description FROM db_snapshots WHERE id = $1 AND family_id = $2`, [req.params.id, familyId]);
+    if (!snap.rows.length) return res.status(404).send("Snapshot no encontrado");
+    const filename = `medicontrol_snapshot_${req.params.id}_${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/json");
+    res.send(JSON.stringify(snap.rows[0].snapshot, null, 2));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Restore from snapshot
+app.post("/admin/backup/snapshot-restore/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const familyId = req.user.family_id;
+    const snap = await client.query(`SELECT snapshot FROM db_snapshots WHERE id = $1 AND family_id = $2`, [req.params.id, familyId]);
+    if (!snap.rows.length) return res.status(404).send("Snapshot no encontrado");
+    const data = typeof snap.rows[0].snapshot === "string" ? JSON.parse(snap.rows[0].snapshot) : snap.rows[0].snapshot;
+    await restoreFromBackup(client, familyId, data);
+    res.redirect("/admin/backup/snapshots?msg=restored");
+  } catch (err) {
+    res.status(500).send(renderShell(req, "Error", "settings", `<div class="card"><h1>Error al restaurar</h1><p>${escapeHtml(err.message)}</p><a class="btn outline" href="/admin/backup/snapshots">Volver</a></div>`));
+  } finally {
+    client.release();
+  }
+});
+
+// Restore from uploaded JSON file
+app.post("/admin/backup/restore", requireRoleHtml(["admin", "superuser"]), upload.single("file"), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    if (req.body?.confirm !== "1") throw new Error("Debes confirmar la restauración.");
+    if (!req.file) throw new Error("No se recibió archivo.");
+    const raw = fs.readFileSync(req.file.path, "utf-8");
+    const data = JSON.parse(raw);
+    const familyId = req.user.family_id;
+    await restoreFromBackup(client, familyId, data);
+    try { fs.unlinkSync(req.file.path); } catch {}
+    res.redirect("/admin/settings?msg=restored");
+  } catch (err) {
+    res.status(500).send(renderShell(req, "Error", "settings", `<div class="card"><h1>Error al restaurar</h1><p>${escapeHtml(err.message)}</p><a class="btn outline" href="/admin/settings">Volver</a></div>`));
+  } finally {
+    client.release();
+  }
+});
+
+async function restoreFromBackup(client, familyId, data) {
+  await client.query("BEGIN");
+  try {
+    // Delete in dependency order
+    await client.query(`DELETE FROM dose_logs WHERE schedule_id IN (SELECT s.id FROM schedules s JOIN medicines m ON m.id = s.medicine_id WHERE m.family_id = $1)`, [familyId]);
+    await client.query(`DELETE FROM schedules WHERE medicine_id IN (SELECT id FROM medicines WHERE family_id = $1)`, [familyId]);
+    await client.query(`DELETE FROM alerts WHERE family_id = $1`, [familyId]);
+    await client.query(`DELETE FROM dose_change_requests WHERE family_id = $1`, [familyId]);
+    await client.query(`DELETE FROM medicine_audits WHERE family_id = $1`, [familyId]);
+    await client.query(`DELETE FROM medicines WHERE family_id = $1`, [familyId]);
+
+    // Restore medicines
+    const idMap = {};
+    if (data.medicines && Array.isArray(data.medicines)) {
+      for (const m of data.medicines) {
+        const r = await client.query(
+          `INSERT INTO medicines (family_id, user_id, name, dosage, current_stock, expiration_date, stock_depleted)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [familyId, m.user_id || null, m.name, m.dosage || "N/A", m.current_stock || 0, m.expiration_date || null, m.stock_depleted || false]
+        );
+        idMap[m.id] = r.rows[0].id;
+      }
+    }
+
+    // Restore schedules
+    const schedMap = {};
+    if (data.schedules && Array.isArray(data.schedules)) {
+      for (const s of data.schedules) {
+        const newMedId = idMap[s.medicine_id] || s.medicine_id;
+        const r = await client.query(
+          `INSERT INTO schedules (medicine_id, user_id, dose_time, frequency, days_of_week, start_date, end_date)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [newMedId, s.user_id, s.dose_time, s.frequency || "1", s.days_of_week || "1234567", s.start_date || null, s.end_date || null]
+        );
+        schedMap[s.id] = r.rows[0].id;
+      }
+    }
+
+    // Restore dose_logs
+    if (data.dose_logs && Array.isArray(data.dose_logs)) {
+      for (const d of data.dose_logs) {
+        const newSchedId = schedMap[d.schedule_id] || d.schedule_id;
+        await client.query(
+          `INSERT INTO dose_logs (schedule_id, taken_at, status) VALUES ($1, $2, $3)`,
+          [newSchedId, d.taken_at, d.status]
+        );
+      }
+    }
+
+    // Restore alerts
+    if (data.alerts && Array.isArray(data.alerts)) {
+      for (const a of data.alerts) {
+        await client.query(
+          `INSERT INTO alerts (family_id, user_id, type, level, message, med_name, med_dosage, dose_time, alert_date, schedule_id, read_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [familyId, a.user_id || null, a.type, a.level || "info", a.message || "", a.med_name || null, a.med_dosage || null, a.dose_time || null, a.alert_date || null, a.schedule_id || null, a.read_at || null]
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  }
+}
 
 app.get("/admin/logs", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   const familyId = req.user.family_id;
