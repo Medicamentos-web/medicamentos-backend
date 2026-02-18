@@ -1306,6 +1306,7 @@ function renderShell(req, title, active, content) {
     { key: "billing", label: "💳 Facturación", href: "/admin/billing" },
     { key: "feedback", label: "⭐ Feedback", href: "/admin/feedback" },
     { key: "leads", label: "📩 Leads", href: "/admin/leads" },
+    { key: "survey", label: "📋 Encuestas", href: "/admin/survey" },
     { key: "reports", label: "📊 Informes", href: "/admin/reports" },
     { key: "settings", label: "⚙ Ajustes", href: "/admin/settings" },
   ];
@@ -4351,6 +4352,53 @@ app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, r
 });
 
 // =============================================================================
+// SURVEY (Landing page feedback survey) - PUBLIC endpoint, no auth required
+// =============================================================================
+app.post("/api/survey", async (req, res) => {
+  const { q1, q2, q3, q4, email, comment, lang, source } = req.body || {};
+  if (!q1 || !q2 || !q3 || !q4) return res.status(400).json({ error: "All questions required" });
+
+  try {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS surveys (
+        id SERIAL PRIMARY KEY,
+        q1_med_count VARCHAR(20),
+        q2_manager VARCHAR(20),
+        q3_challenge VARCHAR(20),
+        q4_willingness VARCHAR(20),
+        email VARCHAR(255),
+        comment TEXT,
+        lang VARCHAR(10),
+        source VARCHAR(50),
+        ip VARCHAR(50),
+        user_agent TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )`
+    );
+    await pool.query(
+      `INSERT INTO surveys (q1_med_count, q2_manager, q3_challenge, q4_willingness, email, comment, lang, source, ip, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [q1, q2, q3, q4, email?.trim()?.toLowerCase() || null, comment || null, lang || "de-CH", source || "landing",
+       req.headers["x-forwarded-for"] || req.ip || null, req.headers["user-agent"] || null]
+    );
+
+    if (email && email.includes("@")) {
+      await pool.query(
+        `INSERT INTO leads (name, email, lang, source)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (email) DO UPDATE SET updated_at = NOW()`,
+        ["Survey User", email.trim().toLowerCase(), lang || "de-CH", "survey"]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[SURVEY]", err.message);
+    res.status(500).json({ error: "Error saving survey" });
+  }
+});
+
+// =============================================================================
 // LEADS (Landing page signups) - PUBLIC endpoint, no auth required
 // =============================================================================
 app.post("/api/leads", async (req, res) => {
@@ -4466,6 +4514,129 @@ app.get("/admin/leads", requireRoleHtml(["admin", "superuser"]), async (req, res
   } catch (err) {
     console.error("[ADMIN LEADS]", err.message);
     res.status(500).send("Error al cargar leads");
+  }
+});
+
+// =============================================================================
+// ADMIN SURVEY RESULTS
+// =============================================================================
+app.get("/admin/survey", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS surveys (
+      id SERIAL PRIMARY KEY, q1_med_count VARCHAR(20), q2_manager VARCHAR(20),
+      q3_challenge VARCHAR(20), q4_willingness VARCHAR(20), email VARCHAR(255),
+      comment TEXT, lang VARCHAR(10), source VARCHAR(50), ip VARCHAR(50),
+      user_agent TEXT, created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    const rows = (await pool.query(`SELECT * FROM surveys ORDER BY created_at DESC LIMIT 500`)).rows;
+    const total = rows.length;
+    const today = rows.filter(r => new Date(r.created_at).toDateString() === new Date().toDateString()).length;
+    const week = rows.filter(r => new Date(r.created_at) > new Date(Date.now() - 7*24*60*60*1000)).length;
+
+    const LABELS = {
+      q1: { title: "Medicamentos diarios", a: "1–2", b: "3–5", c: "6–10", d: "10+" },
+      q2: { title: "Quién gestiona", a: "Yo mismo", b: "Familiar", c: "Cuidador", d: "Médico/Farm." },
+      q3: { title: "Mayor problema", a: "Olvidar dosis", b: "Stock", c: "Informar médico", d: "Familia" },
+      q4: { title: "Disposición a pagar", a: "Sí, ya", b: "Quizás", c: "Solo gratis", d: "No" },
+    };
+
+    const countBy = (field) => {
+      const counts = {};
+      rows.forEach(r => { const v = r[field] || "?"; counts[v] = (counts[v] || 0) + 1; });
+      return counts;
+    };
+
+    const barChart = (qKey, dbField) => {
+      const counts = countBy(dbField);
+      const labels = LABELS[qKey];
+      const maxVal = Math.max(...Object.values(counts), 1);
+      return `
+        <div style="background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:16px; margin-bottom:12px;">
+          <h3 style="font-size:14px; font-weight:bold; color:#0f172a; margin:0 0 12px;">${labels.title}</h3>
+          ${["a","b","c","d"].map(opt => {
+            const c = counts[opt] || 0;
+            const pct = total > 0 ? Math.round((c / total) * 100) : 0;
+            const w = total > 0 ? Math.round((c / maxVal) * 100) : 0;
+            return `
+              <div style="margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:2px;">
+                  <span style="color:#475569;">${labels[opt]}</span>
+                  <span style="color:#64748b; font-weight:bold;">${c} (${pct}%)</span>
+                </div>
+                <div style="background:#f1f5f9; border-radius:6px; height:20px; overflow:hidden;">
+                  <div style="background:linear-gradient(90deg,#8b5cf6,#a855f7); height:100%; width:${w}%; border-radius:6px; transition:width 0.3s;"></div>
+                </div>
+              </div>`;
+          }).join("")}
+        </div>`;
+    };
+
+    const content = `
+      <div class="card">
+        <h1>📋 Resultados de Encuesta</h1>
+        <p class="muted" style="margin-bottom:16px;">Feedback de validación desde la landing page.</p>
+        <div style="display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
+          <div style="background:#f5f3ff; border:1px solid #c4b5fd; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#7c3aed;">${total}</div>
+            <div style="font-size:11px; color:#5b21b6;">Total</div>
+          </div>
+          <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#2563eb;">${week}</div>
+            <div style="font-size:11px; color:#1e40af;">Esta semana</div>
+          </div>
+          <div style="background:#fffbeb; border:1px solid #fbbf24; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#92400e;">${today}</div>
+            <div style="font-size:11px; color:#92400e;">Hoy</div>
+          </div>
+        </div>
+
+        ${total === 0 ? '<p style="color:#94a3b8; text-align:center; padding:32px;">Aún no hay respuestas de encuesta.</p>' : `
+          <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; margin-bottom:20px;">
+            ${barChart("q1", "q1_med_count")}
+            ${barChart("q2", "q2_manager")}
+            ${barChart("q3", "q3_challenge")}
+            ${barChart("q4", "q4_willingness")}
+          </div>
+
+          <h2 style="font-size:16px; font-weight:bold; color:#0f172a; margin:24px 0 12px;">Respuestas individuales</h2>
+          <div style="overflow:auto;">
+            <table class="table">
+              <thead>
+                <tr><th>Fecha</th><th>Meds</th><th>Gestor</th><th>Problema</th><th>Pagar</th><th>Email</th><th>Idioma</th></tr>
+              </thead>
+              <tbody>
+                ${rows.map(r => `
+                  <tr>
+                    <td style="white-space:nowrap; font-size:11px;">${new Date(r.created_at).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                    <td>${LABELS.q1[r.q1_med_count] || r.q1_med_count || "-"}</td>
+                    <td>${LABELS.q2[r.q2_manager] || r.q2_manager || "-"}</td>
+                    <td>${LABELS.q3[r.q3_challenge] || r.q3_challenge || "-"}</td>
+                    <td style="font-weight:bold; color:${r.q4_willingness === "a" ? "#059669" : r.q4_willingness === "b" ? "#2563eb" : r.q4_willingness === "d" ? "#dc2626" : "#92400e"}">${LABELS.q4[r.q4_willingness] || r.q4_willingness || "-"}</td>
+                    <td style="font-size:12px;">${r.email ? '<a href="mailto:' + escapeHtml(r.email) + '" style="color:#2563eb;">' + escapeHtml(r.email) + '</a>' : "-"}</td>
+                    <td>${r.lang || "-"}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+
+          <div style="margin-top:20px; padding:16px; background:#f0fdf4; border:1px solid #86efac; border-radius:12px;">
+            <h3 style="font-size:14px; font-weight:bold; color:#166534; margin:0 0 8px;">Resumen ejecutivo</h3>
+            <ul style="margin:0; padding-left:20px; font-size:13px; color:#15803d;">
+              <li><strong>${total}</strong> respuestas totales</li>
+              <li><strong>${rows.filter(r => r.q4_willingness === "a").length}</strong> (${total > 0 ? Math.round(rows.filter(r => r.q4_willingness === "a").length / total * 100) : 0}%) pagarían inmediatamente</li>
+              <li><strong>${rows.filter(r => r.q4_willingness === "a" || r.q4_willingness === "b").length}</strong> (${total > 0 ? Math.round(rows.filter(r => r.q4_willingness === "a" || r.q4_willingness === "b").length / total * 100) : 0}%) son clientes potenciales</li>
+              <li><strong>${rows.filter(r => r.email).length}</strong> dejaron su email</li>
+              <li>Problema principal: <strong>${(() => { const c = countBy("q3_challenge"); const top = Object.entries(c).sort((a,b) => b[1]-a[1])[0]; return top ? LABELS.q3[top[0]] || top[0] : "-"; })()}</strong></li>
+            </ul>
+          </div>
+        `}
+      </div>
+    `;
+    res.send(renderShell(req, "Encuestas", "survey", content));
+  } catch (err) {
+    console.error("[ADMIN SURVEY]", err.message);
+    res.status(500).send("Error al cargar encuestas");
   }
 });
 
@@ -5786,6 +5957,13 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
             <p>Registros desde landing page</p>
           </div>
         </a>
+        <a class="link-card" href="/admin/survey">
+          <div class="link-icon" style="background:#8b5cf6; color:#fff;">📋</div>
+          <div class="link-meta">
+            <h3>Encuestas</h3>
+            <p>Resultados de validación de interés</p>
+          </div>
+        </a>
         <a class="link-card" href="/health" target="_blank">
           <div class="link-icon" style="background:#22c55e; color:#fff;">💚</div>
           <div class="link-meta">
@@ -5811,6 +5989,61 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
             <p>Vista del usuario de suscripciones</p>
           </div>
         </a>
+      </div>
+
+      <div class="section-title">📣 Redes sociales y marketing</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app/landing" target="_blank">
+          <div class="link-icon" style="background:#10b981; color:#fff;">🎯</div>
+          <div class="link-meta">
+            <h3>Landing + Encuesta</h3>
+            <p>medicamentos-frontend.vercel.app/landing#survey</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/survey">
+          <div class="link-icon" style="background:#8b5cf6; color:#fff;">📊</div>
+          <div class="link-meta">
+            <h3>Resultados encuesta</h3>
+            <p>Ver respuestas y métricas de validación</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/leads">
+          <div class="link-icon" style="background:#f97316; color:#fff;">📩</div>
+          <div class="link-meta">
+            <h3>Leads capturados</h3>
+            <p>Emails y contactos desde landing</p>
+          </div>
+        </a>
+      </div>
+      <div class="link-grid" style="margin-top:8px;">
+        <span class="link-card" style="opacity:0.5; cursor:default;">
+          <div class="link-icon" style="background:#ff4500; color:#fff;">🤖</div>
+          <div class="link-meta">
+            <h3>Reddit</h3>
+            <p>Pendiente de crear</p>
+          </div>
+        </span>
+        <span class="link-card" style="opacity:0.5; cursor:default;">
+          <div class="link-icon" style="background:#da552f; color:#fff;">🚀</div>
+          <div class="link-meta">
+            <h3>Product Hunt</h3>
+            <p>Pendiente de crear</p>
+          </div>
+        </span>
+        <span class="link-card" style="opacity:0.5; cursor:default;">
+          <div class="link-icon" style="background:#4799eb; color:#fff;">💡</div>
+          <div class="link-meta">
+            <h3>Indie Hackers</h3>
+            <p>Pendiente de crear</p>
+          </div>
+        </span>
+        <span class="link-card" style="opacity:0.5; cursor:default;">
+          <div class="link-icon" style="background:#ff6600; color:#fff;">🔶</div>
+          <div class="link-meta">
+            <h3>Hacker News</h3>
+            <p>Pendiente de crear</p>
+          </div>
+        </span>
       </div>
     </div>
 
