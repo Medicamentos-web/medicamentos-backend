@@ -3815,6 +3815,17 @@ app.post("/api/meds-toggle", requireAuth, async (req, res) => {
     );
 
     await pool.query("COMMIT");
+
+    // Mark dose_due alerts as read for this schedule+date
+    try {
+      await pool.query(
+        `UPDATE alerts SET read_at = NOW()
+         WHERE family_id = $1 AND schedule_id = $2 AND alert_date = $3
+           AND type = 'dose_due' AND read_at IS NULL`,
+        [familyId, scheduleId, day]
+      );
+    } catch (e) { console.error("[ALERTS] mark read error:", e.message); }
+
     if (previousStock > 10 && newStock <= 10) {
       const medRow = await pool.query(
         `SELECT name, dosage FROM medicines WHERE id = $1`,
@@ -4395,6 +4406,183 @@ app.post("/api/survey", async (req, res) => {
   } catch (err) {
     console.error("[SURVEY]", err.message);
     res.status(500).json({ error: "Error saving survey" });
+  }
+});
+
+// =============================================================================
+// AUTO-REGISTER TRIAL — Creates family + user + trial from landing page
+// =============================================================================
+app.post("/api/register-trial", async (req, res) => {
+  const { name, email, phone, lang } = req.body || {};
+  if (!email || !email.includes("@")) return res.status(400).json({ error: "Email inválido" });
+  if (!name || name.trim().length < 2) return res.status(400).json({ error: "Nombre requerido" });
+
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanName = name.trim();
+
+  try {
+    const existing = await pool.query(`SELECT id FROM users WHERE email = $1`, [cleanEmail]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: "already_registered", message: "Este email ya está registrado. Use el login." });
+    }
+
+    const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
+    const hashed = await bcrypt.hash(tempPassword, 10);
+
+    await pool.query("BEGIN");
+
+    const famResult = await pool.query(
+      `INSERT INTO families (name, subscription_status, trial_ends_at, max_medicines)
+       VALUES ($1, 'trial', NOW() + INTERVAL '7 days', 5)
+       RETURNING id`,
+      [`Familie ${cleanName}`]
+    );
+    const familyId = famResult.rows[0].id;
+
+    const userResult = await pool.query(
+      `INSERT INTO users (family_id, name, email, password_hash, role, must_change_password)
+       VALUES ($1, $2, $3, $4, 'admin', true)
+       RETURNING id, family_id, name, email, role`,
+      [familyId, cleanName, cleanEmail, hashed]
+    );
+
+    await pool.query("COMMIT");
+
+    // Save as lead too
+    await pool.query(
+      `INSERT INTO leads (name, email, phone, lang, source)
+       VALUES ($1, $2, $3, $4, 'trial_signup')
+       ON CONFLICT (email) DO UPDATE SET source = 'trial_signup', updated_at = NOW()`,
+      [cleanName, cleanEmail, phone || null, lang || "de-CH"]
+    ).catch(() => {});
+
+    const user = userResult.rows[0];
+    const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
+
+    // Send welcome email with login instructions
+    if (mailTransport) {
+      const translations = {
+        "de-CH": {
+          subject: "Willkommen bei MediControl — Ihre Zugangsdaten",
+          greeting: `Hallo ${cleanName}`,
+          intro: "Vielen Dank für Ihre Registrierung bei MediControl! Ihr 7-Tage-Testversion ist aktiv.",
+          credentials: "Ihre Zugangsdaten",
+          family_id: "Family ID",
+          email_label: "E-Mail",
+          password: "Temporäres Passwort",
+          change_pw: "Bitte ändern Sie Ihr Passwort beim ersten Login.",
+          steps_title: "So starten Sie",
+          step1: `Öffnen Sie <a href="${FRONTEND}">${FRONTEND}</a>`,
+          step2: `Geben Sie Family ID: <strong>${familyId}</strong>, E-Mail und Passwort ein`,
+          step3: "Ändern Sie Ihr Passwort",
+          step4: "Fügen Sie Ihre Medikamente hinzu (manuell oder per Rezept-Scan)",
+          step5: "Aktivieren Sie Push-Benachrichtigungen für Erinnerungen",
+          trial_info: "Ihre kostenlose Testversion läuft 7 Tage mit bis zu 5 Medikamenten.",
+          cta: "Jetzt anmelden",
+        },
+        es: {
+          subject: "Bienvenido a MediControl — Tus datos de acceso",
+          greeting: `Hola ${cleanName}`,
+          intro: "Gracias por registrarte en MediControl. Tu prueba gratuita de 7 días está activa.",
+          credentials: "Tus datos de acceso",
+          family_id: "Family ID",
+          email_label: "Email",
+          password: "Contraseña temporal",
+          change_pw: "Por favor cambia tu contraseña en el primer login.",
+          steps_title: "Cómo empezar",
+          step1: `Abre <a href="${FRONTEND}">${FRONTEND}</a>`,
+          step2: `Ingresa Family ID: <strong>${familyId}</strong>, email y contraseña`,
+          step3: "Cambia tu contraseña",
+          step4: "Añade tus medicamentos (manual o escaneando receta)",
+          step5: "Activa las notificaciones push para recordatorios",
+          trial_info: "Tu prueba gratuita dura 7 días con hasta 5 medicamentos.",
+          cta: "Iniciar sesión",
+        },
+        en: {
+          subject: "Welcome to MediControl — Your login details",
+          greeting: `Hello ${cleanName}`,
+          intro: "Thank you for signing up for MediControl! Your 7-day free trial is active.",
+          credentials: "Your login details",
+          family_id: "Family ID",
+          email_label: "Email",
+          password: "Temporary password",
+          change_pw: "Please change your password on first login.",
+          steps_title: "How to get started",
+          step1: `Open <a href="${FRONTEND}">${FRONTEND}</a>`,
+          step2: `Enter Family ID: <strong>${familyId}</strong>, email and password`,
+          step3: "Change your password",
+          step4: "Add your medications (manually or by scanning a prescription)",
+          step5: "Enable push notifications for reminders",
+          trial_info: "Your free trial lasts 7 days with up to 5 medications.",
+          cta: "Sign in now",
+        },
+      };
+
+      const t = translations[lang] || translations["de-CH"];
+
+      const emailHtml = `
+        <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+          <div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%); border-radius:16px; padding:32px; text-align:center; margin-bottom:24px;">
+            <h1 style="color:#34d399; font-size:28px; margin:0;">MediControl</h1>
+            <p style="color:#94a3b8; font-size:14px; margin-top:8px;">Ihre Medikamente. Unter Kontrolle.</p>
+          </div>
+          <h2 style="color:#0f172a;">${t.greeting}!</h2>
+          <p style="color:#475569; font-size:14px;">${t.intro}</p>
+          <div style="background:#f0fdf4; border:2px solid #34d399; border-radius:12px; padding:20px; margin:20px 0;">
+            <h3 style="color:#166534; margin:0 0 12px;">${t.credentials}</h3>
+            <table style="width:100%; font-size:14px;">
+              <tr><td style="color:#64748b; padding:4px 0;">${t.family_id}:</td><td style="font-weight:bold; color:#0f172a;">${familyId}</td></tr>
+              <tr><td style="color:#64748b; padding:4px 0;">${t.email_label}:</td><td style="font-weight:bold; color:#0f172a;">${cleanEmail}</td></tr>
+              <tr><td style="color:#64748b; padding:4px 0;">${t.password}:</td><td style="font-weight:bold; color:#dc2626; font-family:monospace; font-size:16px;">${tempPassword}</td></tr>
+            </table>
+            <p style="color:#dc2626; font-size:12px; margin-top:8px;">⚠️ ${t.change_pw}</p>
+          </div>
+          <h3 style="color:#0f172a;">${t.steps_title}:</h3>
+          <ol style="color:#475569; font-size:14px; line-height:1.8;">
+            <li>${t.step1}</li>
+            <li>${t.step2}</li>
+            <li>${t.step3}</li>
+            <li>${t.step4}</li>
+            <li>${t.step5}</li>
+          </ol>
+          <p style="color:#64748b; font-size:13px; background:#f8fafc; border-radius:8px; padding:12px;">${t.trial_info}</p>
+          <div style="text-align:center; margin:24px 0;">
+            <a href="${FRONTEND}" style="display:inline-block; background:#007AFF; color:white; text-decoration:none; padding:14px 36px; border-radius:12px; font-weight:bold; font-size:16px;">${t.cta}</a>
+          </div>
+          <p style="color:#94a3b8; font-size:11px; text-align:center;">© ${new Date().getFullYear()} MediControl. Swiss Quality Software.</p>
+        </div>`;
+
+      try {
+        await mailTransport.sendMail({
+          from: process.env.SMTP_USER,
+          to: cleanEmail,
+          subject: t.subject,
+          html: emailHtml,
+        });
+      } catch (e) { console.error("[TRIAL] Email error:", e.message); }
+    }
+
+    // Notify admin
+    if (mailTransport && ADMIN_EMAIL) {
+      try {
+        await mailTransport.sendMail({
+          from: process.env.SMTP_USER,
+          to: ADMIN_EMAIL,
+          subject: `Nuevo trial: ${cleanName} (${cleanEmail})`,
+          html: `<p>Nuevo usuario trial registrado desde landing.</p><p>Family ID: ${familyId}<br>Nombre: ${cleanName}<br>Email: ${cleanEmail}<br>Idioma: ${lang || "de-CH"}</p>`,
+        });
+      } catch (e) { console.error("[TRIAL] Admin email error:", e.message); }
+    }
+
+    res.status(201).json({
+      ok: true,
+      family_id: familyId,
+      message: "Cuenta creada. Revisa tu email para las instrucciones de acceso.",
+    });
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("[REGISTER-TRIAL]", err.message);
+    res.status(500).json({ error: "Error al crear la cuenta" });
   }
 });
 
@@ -7233,8 +7421,8 @@ app.listen(port, "0.0.0.0", () => {
   console.log(`Backend escuchando en puerto ${port}`);
 });
 
-// Job automático de alertas: cada 4 horas
-setInterval(runAlertsJob, 4 * 60 * 60 * 1000);
+// Job automático de alertas: cada 15 minutos para push más precisos
+setInterval(runAlertsJob, 15 * 60 * 1000);
 setTimeout(runAlertsJob, 10000);
 
 // ── Trial expiry check: cada 1 hora ──
