@@ -270,6 +270,9 @@ async function ensureUserColumns() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS disclaimer_accepted_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS disclaimer_ip VARCHAR(100)`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS disclaimer_lang VARCHAR(10)`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_activity TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_ip VARCHAR(100)`);
 }
 
 ensureUserColumns().catch((error) => {
@@ -1193,6 +1196,14 @@ function requireAuth(req, res, next) {
   if (!req.user) {
     return res.status(401).json({ error: "no autenticado" });
   }
+  // Track last activity (throttled: max once per 60s per user via in-memory cache)
+  const now = Date.now();
+  const cacheKey = `act_${req.user.sub}`;
+  if (!requireAuth._cache) requireAuth._cache = {};
+  if (!requireAuth._cache[cacheKey] || now - requireAuth._cache[cacheKey] > 60000) {
+    requireAuth._cache[cacheKey] = now;
+    pool.query(`UPDATE users SET last_activity = NOW() WHERE id = $1`, [req.user.sub]).catch(() => {});
+  }
   return next();
 }
 
@@ -1307,6 +1318,7 @@ function renderShell(req, title, active, content) {
     { key: "feedback", label: "⭐ Feedback", href: "/admin/feedback" },
     { key: "leads", label: "📩 Leads", href: "/admin/leads" },
     { key: "survey", label: "📋 Encuestas", href: "/admin/survey" },
+    { key: "online", label: "🟢 En línea", href: "/admin/online" },
     { key: "reports", label: "📊 Informes", href: "/admin/reports" },
     { key: "settings", label: "⚙ Ajustes", href: "/admin/settings" },
   ];
@@ -1754,6 +1766,12 @@ app.post("/auth/login", async (req, res) => {
 
     const token = signToken(user);
     res.cookie(TOKEN_NAME, token, cookieOpts(req));
+
+    // Track login time and IP
+    pool.query(
+      `UPDATE users SET last_login = NOW(), last_ip = $1 WHERE id = $2`,
+      [req.headers["x-forwarded-for"] || req.ip || null, user.id]
+    ).catch(() => {});
 
     const { password_hash, ...safeUser } = user;
     res.json({ user: safeUser, token });
@@ -4825,6 +4843,104 @@ app.get("/admin/survey", requireRoleHtml(["admin", "superuser"]), async (req, re
   } catch (err) {
     console.error("[ADMIN SURVEY]", err.message);
     res.status(500).send("Error al cargar encuestas");
+  }
+});
+
+// =============================================================================
+// ADMIN ONLINE USERS (real-time)
+// =============================================================================
+app.get("/admin/online", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const users = await pool.query(`
+      SELECT u.id, u.name, u.email, u.role, u.last_login, u.last_activity, u.last_ip,
+             f.name AS family_name, f.id AS family_id, f.subscription_status
+      FROM users u
+      LEFT JOIN families f ON f.id = u.family_id
+      ORDER BY u.last_activity DESC NULLS LAST
+    `);
+
+    const now = new Date();
+    const online = users.rows.filter(u => u.last_activity && (now - new Date(u.last_activity)) < 5 * 60 * 1000);
+    const recent = users.rows.filter(u => u.last_activity && (now - new Date(u.last_activity)) < 60 * 60 * 1000 && (now - new Date(u.last_activity)) >= 5 * 60 * 1000);
+    const today = users.rows.filter(u => u.last_login && new Date(u.last_login).toDateString() === now.toDateString());
+
+    const timeAgo = (d) => {
+      if (!d) return "-";
+      const diff = Math.floor((now - new Date(d)) / 1000);
+      if (diff < 60) return "ahora";
+      if (diff < 3600) return Math.floor(diff / 60) + " min";
+      if (diff < 86400) return Math.floor(diff / 3600) + " h";
+      return Math.floor(diff / 86400) + " d";
+    };
+
+    const statusDot = (u) => {
+      if (!u.last_activity) return '<span style="color:#94a3b8;">⚫</span>';
+      const diff = now - new Date(u.last_activity);
+      if (diff < 5 * 60 * 1000) return '<span style="color:#22c55e;">🟢</span>';
+      if (diff < 60 * 60 * 1000) return '<span style="color:#f59e0b;">🟡</span>';
+      return '<span style="color:#94a3b8;">⚫</span>';
+    };
+
+    const content = `
+      <div class="card">
+        <h1>🟢 Usuarios en línea</h1>
+        <p class="muted" style="margin-bottom:16px;">Estado en tiempo real de todos los usuarios. Se actualiza cada 60 segundos.</p>
+
+        <div style="display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
+          <div style="background:#f0fdf4; border:2px solid #22c55e; border-radius:12px; padding:16px 20px; text-align:center; min-width:120px;">
+            <div style="font-size:32px; font-weight:bold; color:#16a34a;">${online.length}</div>
+            <div style="font-size:12px; color:#166534;">🟢 Ahora mismo</div>
+          </div>
+          <div style="background:#fffbeb; border:2px solid #f59e0b; border-radius:12px; padding:16px 20px; text-align:center; min-width:120px;">
+            <div style="font-size:32px; font-weight:bold; color:#d97706;">${recent.length}</div>
+            <div style="font-size:12px; color:#92400e;">🟡 Última hora</div>
+          </div>
+          <div style="background:#eff6ff; border:2px solid #3b82f6; border-radius:12px; padding:16px 20px; text-align:center; min-width:120px;">
+            <div style="font-size:32px; font-weight:bold; color:#2563eb;">${today.length}</div>
+            <div style="font-size:12px; color:#1e40af;">Logins hoy</div>
+          </div>
+          <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:12px; padding:16px 20px; text-align:center; min-width:120px;">
+            <div style="font-size:32px; font-weight:bold; color:#334155;">${users.rows.length}</div>
+            <div style="font-size:12px; color:#475569;">Total usuarios</div>
+          </div>
+        </div>
+
+        <script>setTimeout(()=>location.reload(), 60000);</script>
+
+        <div style="overflow:auto;">
+          <table class="table">
+            <thead>
+              <tr><th>Estado</th><th>Usuario</th><th>Email</th><th>Rol</th><th>Familia</th><th>Plan</th><th>Última actividad</th><th>Último login</th><th>IP</th></tr>
+            </thead>
+            <tbody>
+              ${users.rows.map(u => {
+                const isOnline = u.last_activity && (now - new Date(u.last_activity)) < 5 * 60 * 1000;
+                return `
+                <tr style="${isOnline ? "background:#f0fdf4;" : ""}">
+                  <td style="text-align:center; font-size:16px;">${statusDot(u)}</td>
+                  <td style="font-weight:${isOnline ? "bold" : "normal"};">${escapeHtml(u.name || "-")}</td>
+                  <td style="font-size:12px;"><a href="mailto:${escapeHtml(u.email)}" style="color:#2563eb;">${escapeHtml(u.email)}</a></td>
+                  <td><span class="badge ${u.role === "admin" ? "info" : u.role === "superuser" ? "warn" : ""}">${u.role}</span></td>
+                  <td style="font-size:12px;">${escapeHtml(u.family_name || "-")} (${u.family_id || "-"})</td>
+                  <td>${u.subscription_status === "active" ? '<span class="badge info">Activa</span>' : u.subscription_status === "trial" ? '<span class="badge warn">Trial</span>' : '<span class="badge critical">Inactiva</span>'}</td>
+                  <td style="font-size:12px; font-weight:bold; color:${isOnline ? "#16a34a" : "#64748b"};">${timeAgo(u.last_activity)}</td>
+                  <td style="font-size:11px;">${u.last_login ? new Date(u.last_login).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "-"}</td>
+                  <td style="font-size:10px; color:#94a3b8; font-family:monospace;">${escapeHtml(u.last_ip || "-")}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <p style="margin-top:12px; font-size:11px; color:#94a3b8;">
+          🟢 En línea (< 5 min) · 🟡 Reciente (< 1 hora) · ⚫ Inactivo · Auto-refresh cada 60s
+        </p>
+      </div>
+    `;
+    res.send(renderShell(req, "En línea", "online", content));
+  } catch (err) {
+    console.error("[ADMIN ONLINE]", err.message);
+    res.status(500).send("Error al cargar usuarios en línea");
   }
 });
 
