@@ -6016,6 +6016,20 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
         </a>
       </div>
       <div class="link-grid" style="margin-top:8px;">
+        <a class="link-card" href="https://www.instagram.com/medicontrol.health" target="_blank">
+          <div class="link-icon" style="background:linear-gradient(45deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888); color:#fff;">📷</div>
+          <div class="link-meta">
+            <h3>Instagram</h3>
+            <p>@medicontrol.health · Activo</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://www.tiktok.com/@medicontrol._health" target="_blank">
+          <div class="link-icon" style="background:#000; color:#fff;">🎵</div>
+          <div class="link-meta">
+            <h3>TikTok</h3>
+            <p>@medicontrol._health · Activo</p>
+          </div>
+        </a>
         <span class="link-card" style="opacity:0.5; cursor:default;">
           <div class="link-icon" style="background:#ff4500; color:#fff;">🤖</div>
           <div class="link-meta">
@@ -6035,6 +6049,13 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
           <div class="link-meta">
             <h3>Indie Hackers</h3>
             <p>@medicontrol · Activo</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://www.facebook.com/profile.php" target="_blank">
+          <div class="link-icon" style="background:#1877f2; color:#fff;">📘</div>
+          <div class="link-meta">
+            <h3>Facebook</h3>
+            <p>Alex Meier · Página pendiente</p>
           </div>
         </a>
         <span class="link-card" style="opacity:0.5; cursor:default;">
