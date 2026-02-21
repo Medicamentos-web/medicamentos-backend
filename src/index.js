@@ -251,7 +251,7 @@ async function initVapidKeys() {
   );
 }
 
-initVapidKeys();
+const vapidReady = initVapidKeys();
 
 const uploadDir = path.join(os.tmpdir(), "med-imports");
 if (!fs.existsSync(uploadDir)) {
@@ -748,21 +748,24 @@ async function logMedicineAudit(familyId, userId, medicineId, action, notes) {
 }
 
 async function sendPushToFamily(familyId, payload) {
+  if (!pushKeys) return;
   const subs = await pool.query(
-    `SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE family_id = $1`,
+    `SELECT id, user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE family_id = $1`,
     [familyId]
   );
-  await Promise.all(
-    subs.rows.map((sub) =>
-      webpush.sendNotification(
-        {
-          endpoint: sub.endpoint,
-          keys: { p256dh: sub.p256dh, auth: sub.auth },
-        },
+  for (const sub of subs.rows) {
+    try {
+      await webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
         JSON.stringify(payload)
-      )
-    )
-  );
+      );
+    } catch (err) {
+      console.error(`[PUSH] Family ${familyId} user ${sub.user_id} failed:`, err.statusCode || err.message);
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        await pool.query(`DELETE FROM push_subscriptions WHERE id = $1`, [sub.id]).catch(() => {});
+      }
+    }
+  }
 }
 
 async function sendPushToUser(userId, payload) {
@@ -4151,34 +4154,49 @@ app.get("/admin/meds-critical/pdf", requireRoleHtml(["admin", "superuser"]), asy
 // =============================================================================
 // PUSH NOTIFICATIONS
 // =============================================================================
-app.get("/api/push/vapid", (_req, res) => {
-  res.json({ publicKey: pushKeys.publicKey });
+app.get("/api/push/vapid", async (_req, res) => {
+  if (!pushKeys) await vapidReady;
+  res.json({ publicKey: pushKeys?.publicKey || null });
 });
 
 app.post("/api/push/subscribe", requireAuth, async (req, res) => {
   const familyId = getFamilyId(req);
+  const userId = req.user.sub;
   const sub = req.body || {};
   if (!familyId || !sub.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) {
     return res.status(400).json({ error: "subscription inválida" });
   }
+  // Remove old subscriptions for this user, keep only the fresh one
+  await pool.query(`DELETE FROM push_subscriptions WHERE user_id = $1`, [userId]);
   await pool.query(
     `INSERT INTO push_subscriptions (user_id, family_id, endpoint, p256dh, auth)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (user_id, endpoint)
-     DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
-    [req.user.sub, familyId, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, familyId, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
   );
-  console.log(`[PUSH] Subscription saved for user ${req.user.sub}, endpoint ${sub.endpoint.slice(0, 50)}...`);
+  console.log(`[PUSH] Fresh subscription saved for user ${userId}, endpoint ${sub.endpoint.slice(0, 60)}...`);
   res.json({ ok: true });
 });
 
 app.post("/api/push/test", requireAuth, async (req, res) => {
-  const familyId = getFamilyId(req);
-  await sendPushToFamily(familyId, {
-    title: "Recordatorio",
-    body: "Tienes tomas pendientes.",
-  });
-  res.json({ ok: true });
+  const userId = req.user.sub;
+  try {
+    const subs = await pool.query(
+      `SELECT id, endpoint FROM push_subscriptions WHERE user_id = $1`,
+      [userId]
+    );
+    if (subs.rows.length === 0) {
+      return res.json({ ok: false, error: "no_subscriptions", message: "No hay suscripciones push registradas para tu usuario. Pulsa la campana para activar notificaciones." });
+    }
+    const sent = await sendPushToUser(userId, {
+      title: "MediControl Test",
+      body: "Las notificaciones push funcionan correctamente.",
+      tag: "test-" + Date.now(),
+    });
+    res.json({ ok: true, subscriptions: subs.rows.length, sent });
+  } catch (err) {
+    console.error("[PUSH] Test error:", err.message);
+    res.json({ ok: false, error: err.message });
+  }
 });
 
 app.get("/api/push/status", requireAuth, async (req, res) => {
