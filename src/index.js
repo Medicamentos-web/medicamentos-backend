@@ -4164,9 +4164,11 @@ app.post("/api/push/subscribe", requireAuth, async (req, res) => {
   await pool.query(
     `INSERT INTO push_subscriptions (user_id, family_id, endpoint, p256dh, auth)
      VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (user_id, endpoint) DO NOTHING`,
+     ON CONFLICT (user_id, endpoint)
+     DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
     [req.user.sub, familyId, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
   );
+  console.log(`[PUSH] Subscription saved for user ${req.user.sub}, endpoint ${sub.endpoint.slice(0, 50)}...`);
   res.json({ ok: true });
 });
 
