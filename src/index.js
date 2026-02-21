@@ -218,16 +218,40 @@ const mailTransport =
       })
     : null;
 
-const pushKeys =
-  VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY
-    ? { publicKey: VAPID_PUBLIC_KEY, privateKey: VAPID_PRIVATE_KEY }
-    : webpush.generateVAPIDKeys();
+let pushKeys = null;
 
-webpush.setVapidDetails(
-  "mailto:" + (ADMIN_EMAIL || "admin@example.com"),
-  pushKeys.publicKey,
-  pushKeys.privateKey
-);
+async function initVapidKeys() {
+  if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+    pushKeys = { publicKey: VAPID_PUBLIC_KEY, privateKey: VAPID_PRIVATE_KEY };
+    console.log("[PUSH] VAPID keys loaded from env vars");
+  } else {
+    try {
+      await pool.query(`CREATE TABLE IF NOT EXISTS app_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+      const row = await pool.query(`SELECT value FROM app_config WHERE key = 'vapid_keys'`);
+      if (row.rows.length > 0) {
+        pushKeys = JSON.parse(row.rows[0].value);
+        console.log("[PUSH] VAPID keys loaded from database");
+      } else {
+        pushKeys = webpush.generateVAPIDKeys();
+        await pool.query(
+          `INSERT INTO app_config (key, value) VALUES ('vapid_keys', $1)`,
+          [JSON.stringify(pushKeys)]
+        );
+        console.log("[PUSH] VAPID keys generated and saved to database");
+      }
+    } catch (err) {
+      console.error("[PUSH] Error loading VAPID keys, generating ephemeral:", err.message);
+      pushKeys = webpush.generateVAPIDKeys();
+    }
+  }
+  webpush.setVapidDetails(
+    "mailto:" + (ADMIN_EMAIL || "admin@example.com"),
+    pushKeys.publicKey,
+    pushKeys.privateKey
+  );
+}
+
+initVapidKeys();
 
 const uploadDir = path.join(os.tmpdir(), "med-imports");
 if (!fs.existsSync(uploadDir)) {
@@ -742,21 +766,36 @@ async function sendPushToFamily(familyId, payload) {
 }
 
 async function sendPushToUser(userId, payload) {
+  if (!pushKeys) {
+    console.warn("[PUSH] VAPID keys not yet initialized, skipping push");
+    return 0;
+  }
   const subs = await pool.query(
-    `SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1`,
+    `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1`,
     [userId]
   );
-  await Promise.all(
-    subs.rows.map((sub) =>
-      webpush.sendNotification(
-        {
-          endpoint: sub.endpoint,
-          keys: { p256dh: sub.p256dh, auth: sub.auth },
-        },
+  if (subs.rows.length === 0) {
+    console.log(`[PUSH] No subscriptions for user ${userId}`);
+    return 0;
+  }
+  let sent = 0;
+  for (const sub of subs.rows) {
+    try {
+      await webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
         JSON.stringify(payload)
-      )
-    )
-  );
+      );
+      sent++;
+      console.log(`[PUSH] Sent to user ${userId} (sub ${sub.id})`);
+    } catch (err) {
+      console.error(`[PUSH] Failed for user ${userId}, sub ${sub.id}:`, err.statusCode || err.message);
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        await pool.query(`DELETE FROM push_subscriptions WHERE id = $1`, [sub.id]).catch(() => {});
+        console.log(`[PUSH] Removed expired subscription ${sub.id}`);
+      }
+    }
+  }
+  return sent;
 }
 
 function runOcrOnPdf(filePath, lang = "deu") {
@@ -4140,6 +4179,29 @@ app.post("/api/push/test", requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/api/push/status", requireAuth, async (req, res) => {
+  const userId = req.user.sub;
+  const familyId = getFamilyId(req);
+  const subs = await pool.query(
+    `SELECT id, endpoint, created_at FROM push_subscriptions WHERE user_id = $1`,
+    [userId]
+  );
+  const familySubs = await pool.query(
+    `SELECT user_id, COUNT(*) as count FROM push_subscriptions WHERE family_id = $1 GROUP BY user_id`,
+    [familyId]
+  );
+  res.json({
+    vapid_configured: !!pushKeys,
+    user_subscriptions: subs.rows.length,
+    family_subscriptions: familySubs.rows,
+    subscriptions: subs.rows.map(s => ({
+      id: s.id,
+      endpoint: s.endpoint?.slice(0, 60) + "...",
+      created_at: s.created_at,
+    })),
+  });
+});
+
 // =============================================================================
 // BILLING / STRIPE ENDPOINTS
 // =============================================================================
@@ -5533,11 +5595,10 @@ async function generateDoseAlerts(familyId) {
       [row.id, today]
     );
     if (taken.rows.length > 0) continue;
-    // No duplicar alerta si ya existe para este schedule + hoy
     const alertExists = await pool.query(
       `SELECT 1 FROM alerts
        WHERE family_id = $1 AND type = 'dose_due' AND schedule_id = $2
-         AND alert_date = $3::date AND read_at IS NULL`,
+         AND alert_date = $3::date`,
       [familyId, row.id, today]
     );
     if (alertExists.rows.length > 0) continue;
@@ -5555,12 +5616,14 @@ async function generateDoseAlerts(familyId) {
         row.id,
       ]
     );
-    await sendPushToUser(row.user_id, {
+    const pushSent = await sendPushToUser(row.user_id, {
       title: "Recordatorio de medicación",
       body: `Toma pendiente: ${row.med_name} a las ${row.dose_time}`,
     });
+    console.log(`[ALERTS] Created alert for user ${row.user_id}: ${row.med_name} @ ${row.dose_time} (push sent: ${pushSent})`);
     created += 1;
   }
+  if (created > 0) console.log(`[ALERTS] Family ${familyId}: ${created} new alerts created`);
   return created;
 }
 
