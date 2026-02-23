@@ -4513,9 +4513,10 @@ app.post("/api/survey", async (req, res) => {
 // AUTO-REGISTER TRIAL — Creates family + user + trial from landing page
 // =============================================================================
 app.post("/api/register-trial", async (req, res) => {
-  const { name, email, phone, lang } = req.body || {};
+  const { name, email, phone, lang, source } = req.body || {};
   if (!email || !email.includes("@")) return res.status(400).json({ error: "Email inválido" });
   if (!name || name.trim().length < 2) return res.status(400).json({ error: "Nombre requerido" });
+  const leadSource = source ? `trial_${source}` : "trial_signup";
 
   const cleanEmail = email.trim().toLowerCase();
   const cleanName = name.trim();
@@ -4548,12 +4549,11 @@ app.post("/api/register-trial", async (req, res) => {
 
     await pool.query("COMMIT");
 
-    // Save as lead too
     await pool.query(
       `INSERT INTO leads (name, email, phone, lang, source)
-       VALUES ($1, $2, $3, $4, 'trial_signup')
-       ON CONFLICT (email) DO UPDATE SET source = 'trial_signup', updated_at = NOW()`,
-      [cleanName, cleanEmail, phone || null, lang || "de-CH"]
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (email) DO UPDATE SET source = EXCLUDED.source, updated_at = NOW()`,
+      [cleanName, cleanEmail, phone || null, lang || "de-CH", leadSource]
     ).catch(() => {});
 
     const user = userResult.rows[0];
