@@ -6453,6 +6453,31 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
           </div>
         </span>
       </div>
+
+      <div class="section-title" style="margin-top:16px;">💰 Publicidad pagada</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://ads.google.com" target="_blank">
+          <div class="link-icon" style="background:#4285f4; color:#fff;">🔍</div>
+          <div class="link-meta">
+            <h3>Google Ads</h3>
+            <p>Kampagne: medcontrol_ch · Activo</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app/landing?utm_source=google&utm_medium=cpc&utm_campaign=medcontrol_ch" target="_blank">
+          <div class="link-icon" style="background:#34a853; color:#fff;">🔗</div>
+          <div class="link-meta">
+            <h3>Landing con UTM</h3>
+            <p>URL de destino para Google Ads</p>
+          </div>
+        </a>
+        <a class="link-card" href="/admin/leads">
+          <div class="link-icon" style="background:#fbbc05; color:#fff;">📈</div>
+          <div class="link-meta">
+            <h3>Conversiones Ads</h3>
+            <p>Leads con source: trial_google</p>
+          </div>
+        </a>
+      </div>
     </div>
 
     <!-- Backup / Snapshot / Restore -->
