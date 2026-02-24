@@ -4759,6 +4759,7 @@ app.post("/api/leads", async (req, res) => {
 app.get("/admin/leads", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   try {
     const leads = await pool.query(`SELECT * FROM leads ORDER BY created_at DESC LIMIT 500`);
+    const justCleared = String(req.query?.cleared || "") === "1";
     const total = leads.rows.length;
     const today = leads.rows.filter(l => new Date(l.created_at).toDateString() === new Date().toDateString()).length;
     const week = leads.rows.filter(l => new Date(l.created_at) > new Date(Date.now() - 7*24*60*60*1000)).length;
@@ -4767,6 +4768,7 @@ app.get("/admin/leads", requireRoleHtml(["admin", "superuser"]), async (req, res
       <div class="card">
         <h1>📩 Leads / Interesados</h1>
         <p class="muted" style="margin-bottom:16px;">Registros desde la landing page y otras fuentes.</p>
+        ${justCleared ? `<div style="background:#ecfdf5; border:1px solid #6ee7b7; color:#065f46; border-radius:8px; padding:10px 12px; margin-bottom:12px; font-size:13px;">Leads eliminados correctamente.</div>` : ""}
         <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
           <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
             <div style="font-size:24px; font-weight:bold; color:#059669;">${total}</div>
@@ -4781,6 +4783,9 @@ app.get("/admin/leads", requireRoleHtml(["admin", "superuser"]), async (req, res
             <div style="font-size:11px; color:#92400e;">Hoy</div>
           </div>
         </div>
+        <form method="POST" action="/admin/leads/clear" onsubmit="return confirm('¿Seguro que quieres borrar TODOS los leads? Esta acción no se puede deshacer.');" style="margin-bottom:14px;">
+          <button class="btn outline" type="submit" style="border-color:#ef4444; color:#b91c1c;">🗑 Borrar todos los leads</button>
+        </form>
         ${leads.rows.length === 0 ? `<p style="color:#94a3b8; text-align:center; padding:32px;">Aún no hay leads.</p>` : `
         <div style="overflow:auto;">
           <table class="table">
@@ -4808,6 +4813,16 @@ app.get("/admin/leads", requireRoleHtml(["admin", "superuser"]), async (req, res
   } catch (err) {
     console.error("[ADMIN LEADS]", err.message);
     res.status(500).send("Error al cargar leads");
+  }
+});
+
+app.post("/admin/leads/clear", requireRoleHtml(["admin", "superuser"]), async (_req, res) => {
+  try {
+    await pool.query(`DELETE FROM leads`);
+    return res.redirect("/admin/leads?cleared=1");
+  } catch (err) {
+    console.error("[ADMIN LEADS CLEAR]", err.message);
+    return res.redirect("/admin/leads");
   }
 });
 
