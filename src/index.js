@@ -4653,24 +4653,30 @@ app.post("/api/register-trial", async (req, res) => {
         </div>`;
 
       try {
-        await mailTransport.sendMail({
-          from: process.env.SMTP_USER,
-          to: cleanEmail,
-          subject: t.subject,
-          html: emailHtml,
-        });
+        await Promise.race([
+          mailTransport.sendMail({
+            from: process.env.SMTP_USER,
+            to: cleanEmail,
+            subject: t.subject,
+            html: emailHtml,
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout welcome email")), 8000)),
+        ]);
       } catch (e) { console.error("[TRIAL] Email error:", e.message); }
     }
 
     // Notify admin
     if (mailTransport && ADMIN_EMAIL) {
       try {
-        await mailTransport.sendMail({
-          from: process.env.SMTP_USER,
-          to: ADMIN_EMAIL,
-          subject: `Nuevo trial: ${cleanName} (${cleanEmail})`,
-          html: `<p>Nuevo usuario trial registrado desde landing.</p><p>Family ID: ${familyId}<br>Nombre: ${cleanName}<br>Email: ${cleanEmail}<br>Idioma: ${lang || "de-CH"}</p>`,
-        });
+        await Promise.race([
+          mailTransport.sendMail({
+            from: process.env.SMTP_USER,
+            to: ADMIN_EMAIL,
+            subject: `Nuevo trial: ${cleanName} (${cleanEmail})`,
+            html: `<p>Nuevo usuario trial registrado desde landing.</p><p>Family ID: ${familyId}<br>Nombre: ${cleanName}<br>Email: ${cleanEmail}<br>Idioma: ${lang || "de-CH"}</p>`,
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout admin trial email")), 8000)),
+        ]);
       } catch (e) { console.error("[TRIAL] Admin email error:", e.message); }
     }
 
