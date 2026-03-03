@@ -215,12 +215,14 @@ function cookieOpts(req) {
   };
 }
 
+const SMTP_PORT_NUM = Number(process.env.SMTP_PORT || 587);
 const mailTransport =
   process.env.SMTP_HOST && process.env.SMTP_USER
     ? nodemailer.createTransport({
         host: process.env.SMTP_HOST,
-        port: Number(process.env.SMTP_PORT || 587),
-        secure: false,
+        port: SMTP_PORT_NUM,
+        secure: SMTP_PORT_NUM === 465,
+        requireTLS: SMTP_PORT_NUM === 587,
         auth: {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS,
@@ -2843,7 +2845,7 @@ app.post("/admin/resend-credentials/:id", requireRoleHtml(["admin", "superuser"]
     const sent = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
     res.redirect("/admin/users?msg=" + (sent ? "resend_ok" : "resend_fail"));
   } catch (err) {
-    console.error("[ADMIN RESEND CREDENTIALS]", err.message);
+    console.error("[ADMIN RESEND CREDENTIALS]", err.message, err.code || "");
     res.redirect("/admin/users?msg=resend_fail");
   }
 });
@@ -7272,9 +7274,12 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
   const emergency = req.query?.emergency === "1";
   const settingsMsg = req.query?.msg || "";
   const isAdmin = req.user?.role === "admin";
+  const smtpOk = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
   const content = `
     ${settingsMsg === "snapshot_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Snapshot creado correctamente.</p></div>' : ""}
     ${settingsMsg === "restored" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Base de datos restaurada correctamente desde backup.</p></div>' : ""}
+    ${settingsMsg === "smtp_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Email de prueba enviado correctamente. Revisa la bandeja de ADMIN_EMAIL.</p></div>' : ""}
+    ${settingsMsg === "smtp_fail" ? '<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error SMTP. Revisa los logs del servidor o las variables SMTP_HOST, SMTP_USER, SMTP_PASS. Gmail: usa contraseña de aplicación.</p></div>' : ""}
     <style>
       .link-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
       .link-card { display:flex; align-items:center; gap:12px; padding:14px 16px; border:1px solid var(--border); border-radius:14px; transition:all .15s; background:#fff; }
@@ -7285,6 +7290,19 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
       .link-meta p { margin:2px 0 0; font-size:11px; color:var(--muted); }
       .section-title { font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:24px 0 8px; }
     </style>
+
+    ${isAdmin ? `
+    <div class="card" style="margin-bottom:24px;">
+      <h1>📧 Configuración SMTP</h1>
+      <p class="muted" style="font-size:13px; margin-top:6px;">Estado: ${smtpOk ? "✅ Variables configuradas" : "❌ Faltan SMTP_HOST, SMTP_USER o SMTP_PASS"}</p>
+      ${smtpOk ? `
+      <form method="POST" action="/admin/smtp-test" style="margin-top:12px;">
+        <button type="submit" class="btn outline">Enviar email de prueba a ${escapeHtml(process.env.ADMIN_EMAIL || "ADMIN_EMAIL")}</button>
+      </form>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Gmail: usa contraseña de aplicación (no la contraseña normal). Cuenta Google → Seguridad → Verificación en 2 pasos → Contraseñas de aplicaciones.</p>
+      ` : ""}
+    </div>
+    ` : ""}
 
     <!-- Links de Soporte y Plataformas -->
     <div class="card">
@@ -7588,6 +7606,24 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
     ` : ""}
   `;
   res.send(renderShell(req, "Ajustes", "settings", content));
+});
+
+app.post("/admin/smtp-test", requireRoleHtml(["admin"]), async (req, res) => {
+  if (!mailTransport || !ADMIN_EMAIL) {
+    return res.redirect("/admin/settings?msg=smtp_fail");
+  }
+  try {
+    await mailTransport.sendMail({
+      from: process.env.SMTP_USER,
+      to: ADMIN_EMAIL,
+      subject: "[MediControl] Prueba SMTP correcta",
+      html: `<p>Si recibes este email, la configuración SMTP está funcionando correctamente.</p><p>Enviado: ${new Date().toISOString()}</p>`,
+    });
+    res.redirect("/admin/settings?msg=smtp_ok");
+  } catch (err) {
+    console.error("[SMTP TEST] Error:", err.message);
+    res.redirect("/admin/settings?msg=smtp_fail");
+  }
 });
 
 // =============================================================================
