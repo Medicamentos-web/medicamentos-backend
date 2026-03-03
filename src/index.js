@@ -1796,12 +1796,9 @@ app.post("/auth/register", async (req, res) => {
     city,
     email,
     password,
-    role,
   } = req.body || {};
-  let safeRole = ["admin", "superuser", "user"].includes(role) ? role : "user";
-  if (safeRole === "superuser" && req.user?.role !== "superuser") {
-    safeRole = "user";
-  }
+  // Auto-registro: siempre "user". Solo admin/superuser pueden crear otros roles desde el panel.
+  const safeRole = "user";
 
   const finalName = buildUserName(name, first_name, last_name);
   if (!family_id || !finalName || !email || !password) {
@@ -1945,7 +1942,7 @@ async function findOrCreateOAuthUser(profile, provider) {
   const familyId = famResult.rows[0].id;
   const userResult = await pool.query(
     `INSERT INTO users (family_id, name, email, password_hash, role, auth_provider, must_change_password)
-     VALUES ($1, $2, $3, $4, 'admin', $5, false)
+     VALUES ($1, $2, $3, $4, 'superuser', $5, false)
      RETURNING id, family_id, name, email, role`,
     [familyId, name, cleanEmail, oauthPlaceholder, provider]
   );
@@ -5047,7 +5044,7 @@ app.post("/api/register-trial", async (req, res) => {
 
     const userResult = await pool.query(
       `INSERT INTO users (family_id, name, email, password_hash, role, must_change_password, auth_provider)
-       VALUES ($1, $2, $3, $4, 'admin', true, 'email')
+       VALUES ($1, $2, $3, $4, 'superuser', true, 'email')
        RETURNING id, family_id, name, email, role`,
       [familyId, cleanName, cleanEmail, hashed]
     );
