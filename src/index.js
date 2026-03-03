@@ -1749,6 +1749,7 @@ app.get("/health", async (_req, res) => {
 
 // Diagnóstico: muestra info del servidor sin consultar DB
 app.get("/diag", (req, res) => {
+  const smtpConfigured = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
   res.json({
     ok: true,
     node: process.version,
@@ -1758,6 +1759,8 @@ app.get("/diag", (req, res) => {
       NODE_ENV: process.env.NODE_ENV || "dev",
       HAS_DATABASE_URL: !!process.env.DATABASE_URL,
       HAS_JWT_SECRET: !!process.env.JWT_SECRET,
+      HAS_SMTP: smtpConfigured,
+      HAS_ADMIN_EMAIL: !!process.env.ADMIN_EMAIL,
       PORT: process.env.PORT || "4000",
     },
     cookies: req.cookies ? Object.keys(req.cookies) : [],
