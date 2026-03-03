@@ -2638,22 +2638,32 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
       .users-filters { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
       .users-filters input, .users-filters select { padding:10px 14px; border:1px solid var(--border); border-radius:12px; font-size:14px; }
       .users-filters input { min-width:220px; }
-      .users-table-wrap { overflow-x:auto; margin-top:24px; border:1px solid var(--border); border-radius:12px; }
-      .users-table { width:100%; border-collapse:collapse; font-size:14px; }
-      .users-table th, .users-table td { padding:12px 16px; text-align:left; border-bottom:1px solid var(--border); vertical-align:middle; }
-      .users-table th { background:var(--bg); font-weight:600; color:var(--muted); white-space:nowrap; }
+      .users-table-wrap { margin-top:24px; border:1px solid var(--border); border-radius:12px; overflow:hidden; max-width:100%; }
+      .users-table { width:100%; border-collapse:collapse; font-size:13px; table-layout:fixed; }
+      .users-table th, .users-table td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); vertical-align:middle; word-break:break-word; }
+      .users-table th { background:var(--bg); font-weight:600; color:var(--muted); font-size:12px; }
       .users-table tr:last-child td { border-bottom:none; }
       .users-table tr:hover td { background:rgba(0,0,0,.02); }
-      .user-avatar-sm { width:32px; height:32px; border-radius:8px; background:linear-gradient(135deg,#34d399,#06b6d4); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+      .users-table .col-avatar { width:40px; }
+      .users-table .col-name { width:14%; }
+      .users-table .col-email { width:18%; }
+      .users-table .col-family { width:14%; }
+      .users-table .col-role { width:10%; }
+      .users-table .col-meds { width:6%; }
+      .users-table .col-hor { width:6%; }
+      .users-table .col-login { width:12%; }
+      .users-table .col-actions { width:20%; }
+      .user-avatar-sm { width:28px; height:28px; border-radius:6px; background:linear-gradient(135deg,#34d399,#06b6d4); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:12px; flex-shrink:0; }
       .user-name-cell { font-weight:600; }
-      .user-email-cell { color:var(--muted); font-size:13px; }
-      .user-badge { font-size:11px; padding:4px 8px; border-radius:999px; font-weight:600; white-space:nowrap; }
+      .user-email-cell { color:var(--muted); font-size:12px; }
+      .user-badge { font-size:10px; padding:3px 6px; border-radius:999px; font-weight:600; }
       .user-badge.role-admin { background:#DBEAFE; color:#1E3A8A; }
       .user-badge.role-user { background:#E7F7ED; color:#166534; }
       .user-badge.role-superuser { background:#FEF3C7; color:#92400E; }
       .user-badge.auth { background:#F1F5F9; color:#475569; }
-      .user-actions-cell { white-space:nowrap; }
-      .user-actions-cell a, .user-actions-cell button { font-size:12px; padding:6px 10px; border-radius:8px; font-weight:600; text-decoration:none; margin-right:4px; display:inline-block; }
+      .user-actions-cell { white-space:normal; }
+      .user-actions-cell .act-wrap { display:flex; flex-wrap:wrap; gap:4px; }
+      .user-actions-cell a, .user-actions-cell button { font-size:11px; padding:4px 8px; border-radius:6px; font-weight:600; text-decoration:none; display:inline-block; }
       .user-actions-cell .btn-edit { background:var(--accent); color:#fff; border:none; }
       .user-actions-cell .btn-outline { border:1px solid var(--border); color:var(--ink); background:#fff; }
       .user-actions-cell .btn-danger { background:#dc2626; color:#fff; border:none; }
@@ -2694,6 +2704,17 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
           : `
       <div class="users-table-wrap">
         <table class="users-table">
+          <colgroup>
+            <col class="col-avatar" />
+            <col class="col-name" />
+            <col class="col-email" />
+            ${isAdmin ? '<col class="col-family" />' : ""}
+            <col class="col-role" />
+            <col class="col-meds" />
+            <col class="col-hor" />
+            <col class="col-login" />
+            <col class="col-actions" />
+          </colgroup>
           <thead>
             <tr>
               <th></th>
@@ -2701,9 +2722,9 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
               <th>Email</th>
               ${isAdmin ? "<th>Familia</th>" : ""}
               <th>Rol</th>
-              <th>Medicamentos</th>
-              <th>Horarios</th>
-              <th>Último login</th>
+              <th>Med.</th>
+              <th>Hor.</th>
+              <th>Login</th>
               <th>Acciones</th>
             </tr>
           </thead>
@@ -2728,21 +2749,23 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
               <td><span class="user-name-cell">${escapeHtml(u.name || "-")}</span></td>
               <td><span class="user-email-cell">${escapeHtml(u.email)}</span></td>
               ${isAdmin ? `<td><span class="user-badge" style="background:#E0E7FF; color:#3730A3;">${escapeHtml(u.family_name || "-")}</span></td>` : ""}
-              <td><span class="user-badge role-${u.role || "user"}">${escapeHtml(u.role || "user")}</span> <span class="user-badge auth">${escapeHtml(u.auth_provider || "email")}</span></td>
+              <td><span class="user-badge role-${u.role || "user"}">${escapeHtml(u.role || "user")}</span></td>
               <td>${medsCount}</td>
               <td>${schedCount}</td>
               <td>${lastLogin}</td>
               <td class="user-actions-cell">
-                <a class="btn-edit" href="/admin/user-edit/${u.id}">✏️ Editar</a>
-                <a class="btn-outline" href="/admin/meds-list?user_id=${u.id}">💊 Medicamentos</a>
-                ${(u.auth_provider === "email" || !u.auth_provider) ? `
-                <form method="POST" action="/admin/resend-credentials/${u.id}" style="display:inline;">
-                  <button type="submit" class="btn-outline" onclick="return confirm('¿Reenviar credenciales por email?');">📧 Reenviar</button>
-                </form>` : ""}
-                ${u.id !== currentUserId ? `
-                <form method="POST" action="/admin/user-delete/${u.id}" style="display:inline;">
-                  <button type="submit" class="btn-danger" onclick="return confirm('¿Eliminar este usuario? Se borrarán sus medicamentos y horarios. Esta acción no se puede deshacer.');">🗑 Eliminar</button>
-                </form>` : ""}
+                <div class="act-wrap">
+                  <a class="btn-edit" href="/admin/user-edit/${u.id}" title="Editar">✏️</a>
+                  <a class="btn-outline" href="/admin/meds-list?user_id=${u.id}" title="Medicamentos">💊</a>
+                  ${(u.auth_provider === "email" || !u.auth_provider) ? `
+                  <form method="POST" action="/admin/resend-credentials/${u.id}" style="display:inline;">
+                    <button type="submit" class="btn-outline" title="Reenviar credenciales" onclick="return confirm('¿Reenviar credenciales por email?');">📧</button>
+                  </form>` : ""}
+                  ${u.id !== currentUserId ? `
+                  <form method="POST" action="/admin/user-delete/${u.id}" style="display:inline;">
+                    <button type="submit" class="btn-danger" title="Eliminar" onclick="return confirm('¿Eliminar este usuario? Se borrarán sus medicamentos y horarios. Esta acción no se puede deshacer.');">🗑</button>
+                  </form>` : ""}
+                </div>
               </td>
             </tr>`;
               })
