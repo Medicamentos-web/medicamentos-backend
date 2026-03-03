@@ -2137,6 +2137,18 @@ app.post("/auth/change-password", requireAuth, async (req, res) => {
 async function sendWelcomeEmail(email, tempPassword, context = {}) {
   if (!mailTransport || !email) return false;
   const { name, familyId } = context;
+  const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
+  const GUIDE_BASE = process.env.GUIDE_BASE_URL || FRONTEND;
+  const pdfDe = `${GUIDE_BASE}/guides/MediControl_Guide_DE.pdf`;
+  const pdfEs = `${GUIDE_BASE}/guides/MediControl_Guide_ES.pdf`;
+  const pdfEn = `${GUIDE_BASE}/guides/MediControl_Guide_EN.pdf`;
+  const html = `
+    <p>Tu contraseña temporal es: <strong>${escapeHtml(tempPassword)}</strong></p>
+    <p>Ingresa en <a href="${FRONTEND}">${FRONTEND}</a> y cámbiala desde la app.</p>
+    ${familyId ? `<p><strong>Family ID:</strong> ${familyId}</p>` : ""}
+    <p style="margin-top:16px;"><strong>Guías de ayuda en PDF:</strong><br>
+      <a href="${pdfDe}">Deutsch</a> · <a href="${pdfEs}">Español</a> · <a href="${pdfEn}">English</a>
+    </p>`;
   const MAX_RETRIES = 3;
   const RETRY_DELAY_MS = 2000;
   let lastError = null;
@@ -2145,8 +2157,8 @@ async function sendWelcomeEmail(email, tempPassword, context = {}) {
       await mailTransport.sendMail({
         from: process.env.SMTP_USER,
         to: email,
-        subject: "Tu acceso inicial",
-        html: `<p>Tu contraseña temporal es: <strong>${escapeHtml(tempPassword)}</strong></p><p>Ingresa y cámbiala desde la app.</p>`,
+        subject: "Tu acceso inicial a MediControl",
+        html,
       });
       return true;
     } catch (e) {
@@ -5060,6 +5072,10 @@ app.post("/api/register-trial", async (req, res) => {
 
     const user = userResult.rows[0];
     const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
+    const GUIDE_BASE = process.env.GUIDE_BASE_URL || FRONTEND;
+    const pdfDe = `${GUIDE_BASE}/guides/MediControl_Guide_DE.pdf`;
+    const pdfEs = `${GUIDE_BASE}/guides/MediControl_Guide_ES.pdf`;
+    const pdfEn = `${GUIDE_BASE}/guides/MediControl_Guide_EN.pdf`;
 
     // Send welcome email with login instructions (con reintentos y notificación al admin si falla)
     if (mailTransport) {
@@ -5081,6 +5097,11 @@ app.post("/api/register-trial", async (req, res) => {
           step5: "Aktivieren Sie Push-Benachrichtigungen für Erinnerungen",
           trial_info: "Ihre kostenlose Testversion läuft 7 Tage mit bis zu 5 Medikamenten.",
           cta: "Jetzt anmelden",
+          guide_title: "📄 Hilfe-Guide als PDF",
+          guide_intro: "Laden Sie die Anleitung in Ihrer Sprache herunter:",
+          guide_de: "Deutsch",
+          guide_es: "Español",
+          guide_en: "English",
         },
         es: {
           subject: "Bienvenido a MediControl — Tus datos de acceso",
@@ -5099,6 +5120,11 @@ app.post("/api/register-trial", async (req, res) => {
           step5: "Activa las notificaciones push para recordatorios",
           trial_info: "Tu prueba gratuita dura 7 días con hasta 5 medicamentos.",
           cta: "Iniciar sesión",
+          guide_title: "📄 Guía de ayuda en PDF",
+          guide_intro: "Descarga la guía de usuario en tu idioma:",
+          guide_de: "Deutsch",
+          guide_es: "Español",
+          guide_en: "English",
         },
         en: {
           subject: "Welcome to MediControl — Your login details",
@@ -5117,6 +5143,11 @@ app.post("/api/register-trial", async (req, res) => {
           step5: "Enable push notifications for reminders",
           trial_info: "Your free trial lasts 7 days with up to 5 medications.",
           cta: "Sign in now",
+          guide_title: "📄 Help guide in PDF",
+          guide_intro: "Download the user guide in your preferred language:",
+          guide_de: "Deutsch",
+          guide_es: "Español",
+          guide_en: "English",
         },
       };
 
@@ -5148,6 +5179,15 @@ app.post("/api/register-trial", async (req, res) => {
             <li>${t.step5}</li>
           </ol>
           <p style="color:#64748b; font-size:13px; background:#f8fafc; border-radius:8px; padding:12px;">${t.trial_info}</p>
+          <div style="background:#eff6ff; border:1px solid #3b82f6; border-radius:12px; padding:16px; margin:20px 0;">
+            <h3 style="color:#1e40af; margin:0 0 8px; font-size:15px;">${t.guide_title}</h3>
+            <p style="color:#475569; font-size:13px; margin:0 0 12px;">${t.guide_intro}</p>
+            <p style="margin:0; font-size:13px;">
+              <a href="${pdfDe}" style="color:#2563eb; text-decoration:none; margin-right:12px;">📄 ${t.guide_de}</a>
+              <a href="${pdfEs}" style="color:#2563eb; text-decoration:none; margin-right:12px;">📄 ${t.guide_es}</a>
+              <a href="${pdfEn}" style="color:#2563eb; text-decoration:none;">📄 ${t.guide_en}</a>
+            </p>
+          </div>
           <div style="text-align:center; margin:24px 0;">
             <a href="${FRONTEND}" style="display:inline-block; background:#007AFF; color:white; text-decoration:none; padding:14px 36px; border-radius:12px; font-weight:bold; font-size:16px;">${t.cta}</a>
           </div>
@@ -5690,6 +5730,10 @@ const INACTIVE_DAYS = Number(process.env.INACTIVE_USER_DAYS) || 7;
 async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang) {
   if (!mailTransport) return false;
   const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
+  const GUIDE_BASE = process.env.GUIDE_BASE_URL || FRONTEND;
+  const pdfDe = `${GUIDE_BASE}/guides/MediControl_Guide_DE.pdf`;
+  const pdfEs = `${GUIDE_BASE}/guides/MediControl_Guide_ES.pdf`;
+  const pdfEn = `${GUIDE_BASE}/guides/MediControl_Guide_EN.pdf`;
   const translations = {
     "de-CH": {
       subject: "Willkommen bei MediControl — Ihre Zugangsdaten",
@@ -5708,6 +5752,11 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       step5: "Aktivieren Sie Push-Benachrichtigungen für Erinnerungen",
       trial_info: "Ihre kostenlose Testversion läuft 7 Tage mit bis zu 5 Medikamenten.",
       cta: "Jetzt anmelden",
+      guide_title: "📄 Hilfe-Guide als PDF",
+      guide_intro: "Laden Sie die Anleitung in Ihrer Sprache herunter:",
+      guide_de: "Deutsch",
+      guide_es: "Español",
+      guide_en: "English",
     },
     es: {
       subject: "Bienvenido a MediControl — Tus datos de acceso",
@@ -5726,6 +5775,11 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       step5: "Activa las notificaciones push para recordatorios",
       trial_info: "Tu prueba gratuita dura 7 días con hasta 5 medicamentos.",
       cta: "Iniciar sesión",
+      guide_title: "📄 Guía de ayuda en PDF",
+      guide_intro: "Descarga la guía de usuario en tu idioma:",
+      guide_de: "Deutsch",
+      guide_es: "Español",
+      guide_en: "English",
     },
     en: {
       subject: "Welcome to MediControl — Your login details",
@@ -5744,6 +5798,11 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       step5: "Enable push notifications for reminders",
       trial_info: "Your free trial lasts 7 days with up to 5 medications.",
       cta: "Sign in now",
+      guide_title: "📄 Help guide in PDF",
+      guide_intro: "Download the user guide in your preferred language:",
+      guide_de: "Deutsch",
+      guide_es: "Español",
+      guide_en: "English",
     },
   };
   const t = translations[lang] || translations["de-CH"];
@@ -5773,6 +5832,15 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
         <li>${t.step5}</li>
       </ol>
       <p style="color:#64748b; font-size:13px; background:#f8fafc; border-radius:8px; padding:12px;">${t.trial_info}</p>
+      <div style="background:#eff6ff; border:1px solid #3b82f6; border-radius:12px; padding:16px; margin:20px 0;">
+        <h3 style="color:#1e40af; margin:0 0 8px; font-size:15px;">${t.guide_title}</h3>
+        <p style="color:#475569; font-size:13px; margin:0 0 12px;">${t.guide_intro}</p>
+        <p style="margin:0; font-size:13px;">
+          <a href="${pdfDe}" style="color:#2563eb; text-decoration:none; margin-right:12px;">📄 ${t.guide_de}</a>
+          <a href="${pdfEs}" style="color:#2563eb; text-decoration:none; margin-right:12px;">📄 ${t.guide_es}</a>
+          <a href="${pdfEn}" style="color:#2563eb; text-decoration:none;">📄 ${t.guide_en}</a>
+        </p>
+      </div>
       <div style="text-align:center; margin:24px 0;">
         <a href="${FRONTEND}" style="display:inline-block; background:#007AFF; color:white; text-decoration:none; padding:14px 36px; border-radius:12px; font-weight:bold; font-size:16px;">${t.cta}</a>
       </div>
