@@ -2617,6 +2617,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
   if (isAdmin && familyFilter) {
     rows = rows.filter((u) => String(u.family_id) === familyFilter);
   }
+  rows.sort((a, b) => (a.name || "").localeCompare(b.name || "", "es", { sensitivity: "base" }));
   const msgHtml = msg === "deleted"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuario eliminado correctamente.</div>'
     : msg === "resend_ok"
@@ -2637,33 +2638,30 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
       .users-filters { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
       .users-filters input, .users-filters select { padding:10px 14px; border:1px solid var(--border); border-radius:12px; font-size:14px; }
       .users-filters input { min-width:220px; }
-      .users-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px; }
-      .user-card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:20px; transition:box-shadow .2s, transform .05s; }
-      .user-card:hover { box-shadow:0 12px 28px -12px rgba(15,23,42,.25); }
-      .user-card-header { display:flex; align-items:flex-start; gap:16px; margin-bottom:12px; }
-      .user-avatar { width:48px; height:48px; border-radius:12px; background:linear-gradient(135deg,#34d399,#06b6d4); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:18px; flex-shrink:0; }
-      .user-info { flex:1; min-width:0; }
-      .user-name { font-weight:700; font-size:16px; margin:0 0 2px; }
-      .user-email { font-size:13px; color:var(--muted); word-break:break-all; }
-      .user-meta { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
-      .user-badge { font-size:11px; padding:4px 10px; border-radius:999px; font-weight:600; }
+      .users-table-wrap { overflow-x:auto; margin-top:24px; border:1px solid var(--border); border-radius:12px; }
+      .users-table { width:100%; border-collapse:collapse; font-size:14px; }
+      .users-table th, .users-table td { padding:12px 16px; text-align:left; border-bottom:1px solid var(--border); vertical-align:middle; }
+      .users-table th { background:var(--bg); font-weight:600; color:var(--muted); white-space:nowrap; }
+      .users-table tr:last-child td { border-bottom:none; }
+      .users-table tr:hover td { background:rgba(0,0,0,.02); }
+      .user-avatar-sm { width:32px; height:32px; border-radius:8px; background:linear-gradient(135deg,#34d399,#06b6d4); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+      .user-name-cell { font-weight:600; }
+      .user-email-cell { color:var(--muted); font-size:13px; }
+      .user-badge { font-size:11px; padding:4px 8px; border-radius:999px; font-weight:600; white-space:nowrap; }
       .user-badge.role-admin { background:#DBEAFE; color:#1E3A8A; }
       .user-badge.role-user { background:#E7F7ED; color:#166534; }
       .user-badge.role-superuser { background:#FEF3C7; color:#92400E; }
       .user-badge.auth { background:#F1F5F9; color:#475569; }
-      .user-stats { font-size:12px; color:var(--muted); margin-top:8px; }
-      .user-actions { display:flex; gap:8px; margin-top:16px; flex-wrap:wrap; }
-      .user-actions a { font-size:13px; padding:8px 14px; border-radius:10px; font-weight:600; text-decoration:none; }
-      .user-actions .btn-edit { background:var(--accent); color:#fff; border:none; }
-      .user-actions .btn-outline { border:1px solid var(--border); color:var(--ink); background:#fff; }
-      .user-actions a:hover { opacity:.9; }
-      .user-actions .btn-danger { background:#dc2626; color:#fff; border:none; }
-      .user-actions .btn-danger:hover { background:#b91c1c; }
-      .user-actions form { display:inline; margin:0; }
-      .user-actions button { font-size:13px; padding:8px 14px; border-radius:10px; font-weight:600; cursor:pointer; border:none; font-family:inherit; }
+      .user-actions-cell { white-space:nowrap; }
+      .user-actions-cell a, .user-actions-cell button { font-size:12px; padding:6px 10px; border-radius:8px; font-weight:600; text-decoration:none; margin-right:4px; display:inline-block; }
+      .user-actions-cell .btn-edit { background:var(--accent); color:#fff; border:none; }
+      .user-actions-cell .btn-outline { border:1px solid var(--border); color:var(--ink); background:#fff; }
+      .user-actions-cell .btn-danger { background:#dc2626; color:#fff; border:none; }
+      .user-actions-cell a:hover, .user-actions-cell button:hover { opacity:.9; }
+      .user-actions-cell form { display:inline; margin:0; }
+      .user-actions-cell button { cursor:pointer; font-family:inherit; }
       .users-empty { text-align:center; padding:48px 24px; color:var(--muted); }
       .users-empty p { margin:0 0 16px; font-size:16px; }
-      @media (max-width: 640px) { .users-grid { grid-template-columns: 1fr; } }
     </style>
     <div class="card">
       ${msgHtml}
@@ -2686,44 +2684,55 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
         </select>
         <button type="submit" class="btn outline">🔎 Filtrar</button>
       </form>
-      <div class="users-grid" style="margin-top:24px;">
-        ${
-          rows.length === 0
-            ? `
-          <div class="users-empty" style="grid-column:1/-1;">
-            <p>${q || roleFilter || familyFilter ? "No hay usuarios que coincidan con el filtro." : "Aún no hay usuarios. Añade el primero."}</p>
-            ${!q && !roleFilter && !familyFilter ? '<a class="btn primary" href="/admin/user-new">➕ Crear primer usuario</a>' : '<a class="btn outline" href="/admin/users">Limpiar filtros</a>'}
-          </div>`
-            : rows
-                .map((u) => {
-                  const initial = (u.name || u.email || "?").charAt(0).toUpperCase();
-                  const lastLogin = u.last_login
-                    ? new Date(u.last_login).toLocaleDateString("es-ES", {
-                        day: "2-digit",
-                        month: "short",
-                        year: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })
-                    : "Sin login";
-                  const medsCount = Number(u.meds_count) || 0;
-                  const schedCount = Number(u.schedules_count) || 0;
-                  return `
-            <div class="user-card">
-              <div class="user-card-header">
-                <div class="user-avatar">${escapeHtml(initial)}</div>
-                <div class="user-info">
-                  <div class="user-name">${escapeHtml(u.name || "-")}</div>
-                  <div class="user-email">${escapeHtml(u.email)}</div>
-                </div>
-              </div>
-              <div class="user-meta">
-                <span class="user-badge role-${u.role || "user"}">${escapeHtml(u.role || "user")}</span>
-                <span class="user-badge auth">${escapeHtml(u.auth_provider || "email")}</span>
-                ${isAdmin && u.family_name ? `<span class="user-badge" style="background:#E0E7FF; color:#3730A3;">${escapeHtml(u.family_name)}</span>` : ""}
-              </div>
-              <div class="user-stats">${medsCount} medicamentos · ${schedCount} horarios · Último login: ${lastLogin}</div>
-              <div class="user-actions">
+      ${
+        rows.length === 0
+          ? `
+      <div class="users-empty" style="margin-top:24px;">
+        <p>${q || roleFilter || familyFilter ? "No hay usuarios que coincidan con el filtro." : "Aún no hay usuarios. Añade el primero."}</p>
+        ${!q && !roleFilter && !familyFilter ? '<a class="btn primary" href="/admin/user-new">➕ Crear primer usuario</a>' : '<a class="btn outline" href="/admin/users">Limpiar filtros</a>'}
+      </div>`
+          : `
+      <div class="users-table-wrap">
+        <table class="users-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Nombre</th>
+              <th>Email</th>
+              ${isAdmin ? "<th>Familia</th>" : ""}
+              <th>Rol</th>
+              <th>Medicamentos</th>
+              <th>Horarios</th>
+              <th>Último login</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map((u) => {
+                const initial = (u.name || u.email || "?").charAt(0).toUpperCase();
+                const lastLogin = u.last_login
+                  ? new Date(u.last_login).toLocaleDateString("es-ES", {
+                      day: "2-digit",
+                      month: "short",
+                      year: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
+                  : "Sin login";
+                const medsCount = Number(u.meds_count) || 0;
+                const schedCount = Number(u.schedules_count) || 0;
+                return `
+            <tr>
+              <td><div class="user-avatar-sm">${escapeHtml(initial)}</div></td>
+              <td><span class="user-name-cell">${escapeHtml(u.name || "-")}</span></td>
+              <td><span class="user-email-cell">${escapeHtml(u.email)}</span></td>
+              ${isAdmin ? `<td><span class="user-badge" style="background:#E0E7FF; color:#3730A3;">${escapeHtml(u.family_name || "-")}</span></td>` : ""}
+              <td><span class="user-badge role-${u.role || "user"}">${escapeHtml(u.role || "user")}</span> <span class="user-badge auth">${escapeHtml(u.auth_provider || "email")}</span></td>
+              <td>${medsCount}</td>
+              <td>${schedCount}</td>
+              <td>${lastLogin}</td>
+              <td class="user-actions-cell">
                 <a class="btn-edit" href="/admin/user-edit/${u.id}">✏️ Editar</a>
                 <a class="btn-outline" href="/admin/meds-list?user_id=${u.id}">💊 Medicamentos</a>
                 ${(u.auth_provider === "email" || !u.auth_provider) ? `
@@ -2734,12 +2743,14 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
                 <form method="POST" action="/admin/user-delete/${u.id}" style="display:inline;">
                   <button type="submit" class="btn-danger" onclick="return confirm('¿Eliminar este usuario? Se borrarán sus medicamentos y horarios. Esta acción no se puede deshacer.');">🗑 Eliminar</button>
                 </form>` : ""}
-              </div>
-            </div>`;
-                })
-                .join("")
-        }
-      </div>
+              </td>
+            </tr>`;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </div>`
+      }
     </div>
   `;
   res.send(renderShell(req, "Usuarios", "patients", content));
