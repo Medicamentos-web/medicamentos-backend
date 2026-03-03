@@ -1371,23 +1371,49 @@ function renderShell(req, title, active, content) {
 
   const userName = escapeHtml(req.user?.name || "Admin");
   const userEmail = escapeHtml(req.user?.email || "");
-  const items = [
-    { key: "panel", label: "🏠 Panel", href: "/dashboard" },
-    { key: "patients", label: "👤 Pacientes", href: "/admin/users" },
-    { key: "meds", label: "💊 Medicamentos", href: "/admin/meds-list" },
-    { key: "alerts", label: "🔔 Alertas", href: "/admin/alerts" },
-    { key: "dose", label: "🩺 Cambios de dosis", href: "/admin/dose-requests" },
-    { key: "history", label: "📁 Historial médico", href: "/admin/medical-records" },
-    { key: "imports", label: "⬆ Importaciones", href: "/admin/import" },
-    { key: "billing", label: "💳 Facturación", href: "/admin/billing" },
-    { key: "feedback", label: "⭐ Feedback", href: "/admin/feedback" },
-    { key: "leads", label: "📩 Leads", href: "/admin/leads" },
-    { key: "survey", label: "📋 Encuestas", href: "/admin/survey" },
-    { key: "feature-feedback", label: "💡 Feedback funciones", href: "/admin/feature-feedback" },
-    { key: "online", label: "🟢 En línea", href: "/admin/online" },
-    { key: "inactive", label: "🗑 Usuarios inactivos", href: "/admin/inactive-users" },
-    { key: "reports", label: "📊 Informes", href: "/admin/reports" },
-    { key: "settings", label: "⚙ Ajustes", href: "/admin/settings" },
+  const isAdmin = req.user?.role === "admin";
+  const navSections = [
+    {
+      title: "Principal",
+      items: [
+        { key: "panel", label: "Panel", href: "/dashboard", icon: "◉" },
+        { key: "patients", label: "Pacientes", href: "/admin/users", icon: "👤" },
+        { key: "meds", label: "Medicamentos", href: "/admin/meds-list", icon: "💊" },
+        { key: "alerts", label: "Alertas", href: "/admin/alerts", icon: "🔔" },
+      ],
+    },
+    {
+      title: "Atención clínica",
+      items: [
+        { key: "dose", label: "Cambios de dosis", href: "/admin/dose-requests", icon: "🩺" },
+        { key: "history", label: "Historial médico", href: "/admin/medical-records", icon: "📁" },
+        { key: "imports", label: "Importar", href: "/admin/import", icon: "⬆" },
+      ],
+    },
+    {
+      title: "Marketing y feedback",
+      items: [
+        { key: "billing", label: "Facturación", href: "/admin/billing", icon: "💳", adminOnly: true },
+        { key: "leads", label: "Leads", href: "/admin/leads", icon: "📩" },
+        { key: "survey", label: "Encuestas", href: "/admin/survey", icon: "📋" },
+        { key: "feedback", label: "Feedback", href: "/admin/feedback", icon: "⭐" },
+        { key: "feature-feedback", label: "Feedback funciones", href: "/admin/feature-feedback", icon: "💡" },
+      ],
+    },
+    {
+      title: "Operaciones",
+      items: [
+        { key: "online", label: "En línea", href: "/admin/online", icon: "🟢" },
+        { key: "inactive", label: "Usuarios inactivos", href: "/admin/inactive-users", icon: "🗑", adminOnly: true },
+        { key: "reports", label: "Informes", href: "/admin/reports", icon: "📊" },
+      ],
+    },
+    {
+      title: "Sistema",
+      items: [
+        { key: "settings", label: "Ajustes", href: "/admin/settings", icon: "⚙" },
+      ],
+    },
   ];
   return `
     <!doctype html>
@@ -1413,11 +1439,23 @@ function renderShell(req, title, active, content) {
           body { margin:0; font-family: "Inter", Arial, sans-serif; background:var(--bg); color:var(--ink); }
           a { color:inherit; text-decoration:none; }
           .app { display:flex; min-height:100vh; }
-          .sidebar { width:260px; background:#fff; border-right:1px solid var(--border); padding:20px 16px; position:sticky; top:0; height:100vh; }
-          .sidebar h4 { margin:18px 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
-          .nav { display:flex; flex-direction:column; gap:6px; }
-          .nav a { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px; color:var(--ink); }
-          .nav a.active { background:#EEF2FF; color:#1E3A8A; border-left:3px solid var(--accent); padding-left:9px; }
+          .sidebar { width:272px; min-width:272px; background:linear-gradient(180deg,#fff 0%,#f8fafc 100%); border-right:1px solid var(--border); padding:0; position:sticky; top:0; height:100vh; display:flex; flex-direction:column; overflow-y:auto; }
+          .sidebar-brand { padding:20px 20px 16px; border-bottom:1px solid var(--border); }
+          .sidebar-brand .logo { width:36px; height:36px; background:linear-gradient(135deg,#34d399,#06b6d4); border-radius:10px; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:800; font-size:16px; }
+          .sidebar-brand .name { font-weight:700; font-size:15px; letter-spacing:-.02em; margin-top:10px; }
+          .sidebar-brand .tagline { font-size:11px; color:var(--muted); margin-top:2px; }
+          .sidebar-nav { flex:1; padding:16px 12px; }
+          .sidebar-section { margin-bottom:20px; }
+          .sidebar-section:last-child { margin-bottom:0; }
+          .sidebar-section-title { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.12em; color:var(--muted); padding:0 12px 8px; margin:0; }
+          .sidebar-nav a { display:flex; align-items:center; gap:12px; padding:10px 12px; border-radius:10px; color:var(--ink); font-size:14px; font-weight:500; transition:background .15s, color .15s; }
+          .sidebar-nav a:hover { background:rgba(37,99,235,.06); color:var(--accent); }
+          .sidebar-nav a.active { background:rgba(37,99,235,.1); color:#1d4ed8; font-weight:600; }
+          .sidebar-nav a .nav-icon { width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; }
+          .sidebar-user { padding:16px 20px; border-top:1px solid var(--border); background:#fff; }
+          .sidebar-user .name { font-size:13px; font-weight:600; }
+          .sidebar-user .email { font-size:11px; color:var(--muted); margin-top:2px; word-break:break-all; }
+          .sidebar-user .role { font-size:10px; color:var(--accent); font-weight:600; text-transform:uppercase; letter-spacing:.05em; margin-top:4px; }
           .main { flex:1; display:flex; flex-direction:column; }
           .topbar { position:sticky; top:0; z-index:10; background:#fff; border-bottom:1px solid var(--border); height:64px; display:flex; align-items:center; justify-content:space-between; padding:0 24px; }
           .brand { font-weight:800; letter-spacing:.08em; font-size:14px; }
@@ -1452,37 +1490,40 @@ function renderShell(req, title, active, content) {
       <body>
         <div class="app">
           <aside class="sidebar">
-            <div class="brand" style="display:flex; align-items:center; gap:8px;"><div style="width:28px; height:28px; background:linear-gradient(135deg,#34d399,#06b6d4); border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:bold; font-size:13px;">M</div>MediControl</div>
-            <h4>Gestión</h4>
-            <nav class="nav">
-              ${items
-                .slice(0, 5)
+            <div class="sidebar-brand">
+              <div class="logo">M</div>
+              <div class="name">MediControl</div>
+              <div class="tagline">Admin Panel</div>
+            </div>
+            <nav class="sidebar-nav">
+              ${navSections
                 .map(
-                  (i) =>
-                    `<a class="${active === i.key ? "active" : ""}" href="${i.href}">${i.label}</a>`
+                  (sec) => {
+                    const filtered = sec.items.filter((i) => !i.adminOnly || isAdmin);
+                    if (filtered.length === 0) return "";
+                    return `
+              <div class="sidebar-section">
+                <h4 class="sidebar-section-title">${escapeHtml(sec.title)}</h4>
+                ${filtered
+                  .map(
+                    (i) =>
+                      `<a class="${active === i.key ? "active" : ""}" href="${i.href}"><span class="nav-icon">${i.icon}</span>${escapeHtml(i.label)}</a>`
+                  )
+                  .join("")}
+              </div>`;
+                  }
                 )
                 .join("")}
             </nav>
-            <h4>Documentos</h4>
-            <nav class="nav">
-              ${items
-                .slice(5, 7)
-                .map(
-                  (i) =>
-                    `<a class="${active === i.key ? "active" : ""}" href="${i.href}">${i.label}</a>`
-                )
-                .join("")}
-            </nav>
-            <h4>Sistema</h4>
-            <nav class="nav">
-              ${items
-                .slice(7)
-                .map(
-                  (i) =>
-                    `<a class="${active === i.key ? "active" : ""}" href="${i.href}">${i.label}</a>`
-                )
-                .join("")}
-            </nav>
+            <div class="sidebar-user">
+              <div class="name">${userName}</div>
+              <div class="email">${userEmail}</div>
+              <div class="role">${escapeHtml(req.user?.role || "user")}</div>
+              <div style="margin-top:10px; display:flex; gap:8px;">
+                <a href="/admin/settings" style="font-size:12px; color:var(--accent); font-weight:600;">Ajustes</a>
+                <a href="/admin/logout" style="font-size:12px; color:var(--muted);">Cerrar sesión</a>
+              </div>
+            </div>
           </aside>
           <div class="main">
             <header class="topbar">
@@ -1808,19 +1849,25 @@ app.post("/auth/register", async (req, res) => {
 
 app.post("/auth/login", async (req, res) => {
   const { family_id, email, password } = req.body || {};
-  if (!family_id || !email || !password) {
+  if (!email || !password) {
     return res
       .status(400)
-      .json({ error: "family_id, email y password son requeridos" });
+      .json({ error: "email y password son requeridos" });
   }
 
   try {
-    const result = await pool.query(
-      `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password
-       FROM users
-       WHERE family_id = $1 AND email = $2`,
-      [Number(family_id), email]
-    );
+    // Si se envía family_id, usarlo. Si no, buscar por email (email es único por usuario).
+    const result = family_id
+      ? await pool.query(
+          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password
+           FROM users WHERE family_id = $1 AND email = $2`,
+          [Number(family_id), email]
+        )
+      : await pool.query(
+          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password
+           FROM users WHERE email = $1`,
+          [email]
+        );
     if (result.rows.length === 0) {
       return res.status(401).json({ error: "credenciales inválidas" });
     }
@@ -1975,17 +2022,14 @@ if (FACEBOOK_APP_ID && FACEBOOK_APP_SECRET) {
 
 app.post("/auth/forgot", async (req, res) => {
   const { family_id, email } = req.body || {};
-  if (!family_id || !email) {
-    return res
-      .status(400)
-      .json({ error: "family_id y email son requeridos" });
+  if (!email) {
+    return res.status(400).json({ error: "email es requerido" });
   }
 
   try {
-    const userResult = await pool.query(
-      `SELECT id FROM users WHERE family_id = $1 AND email = $2`,
-      [Number(family_id), email]
-    );
+    const userResult = family_id
+      ? await pool.query(`SELECT id FROM users WHERE family_id = $1 AND email = $2`, [Number(family_id), email])
+      : await pool.query(`SELECT id FROM users WHERE email = $1`, [email]);
 
     if (userResult.rows.length === 0) {
       return res.json({ ok: true });
@@ -2196,8 +2240,8 @@ app.get("/admin/login", (_req, res) => {
         <span class="badge">🇨🇭 Swiss Healthcare SaaS</span>
         ${errorMessage ? `<div class="error">${errorMessage}</div>` : ""}
         <form method="POST" action="/admin/login">
-          <label>Family ID</label>
-          <input name="family_id" type="text" placeholder="1" required value="1" />
+          <label>Family ID <span style="font-weight:400; color:#64748b;">(opcional — si no lo recuerdas, déjalo vacío)</span></label>
+          <input name="family_id" type="text" placeholder="Ej: 1" />
           <label>Email</label>
           <input name="email" type="email" placeholder="admin@medicontrol.app" required />
           <label>Password</label>
@@ -2217,18 +2261,23 @@ app.get("/admin/login", (_req, res) => {
 
 app.post("/admin/login", async (req, res) => {
   const { family_id, email, password } = req.body || {};
-  if (!family_id || !email || !password) {
+  if (!email || !password) {
     return res.redirect("/admin/login?error=1");
   }
 
   try {
-    console.log("[AUTH] Intentando login admin:", email, "family:", family_id);
-    const result = await pool.query(
-      `SELECT id, family_id, name, email, role, password_hash
-       FROM users
-       WHERE family_id = $1 AND email = $2`,
-      [Number(family_id), email]
-    );
+    const result = family_id
+      ? await pool.query(
+          `SELECT id, family_id, name, email, role, password_hash
+           FROM users WHERE family_id = $1 AND email = $2`,
+          [Number(family_id), email]
+        )
+      : await pool.query(
+          `SELECT id, family_id, name, email, role, password_hash
+           FROM users WHERE email = $1`,
+          [email]
+        );
+    console.log("[AUTH] Login admin:", email, "family:", result.rows[0]?.family_id);
     console.log("[AUTH] Query OK, rows:", result.rows.length);
     if (result.rows.length === 0) {
       return res.redirect("/admin/login?error=1");
@@ -2525,28 +2574,48 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
 app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   const familyId = req.user.family_id;
   const currentUserId = Number(req.user.sub);
+  const isAdmin = req.user.role === "admin";
   const q = (req.query?.q || "").trim().toLowerCase();
   const roleFilter = req.query?.role || "";
+  const familyFilter = req.query?.family_id || "";
   const msg = req.query?.msg || "";
   const users = await pool.query(
-    `SELECT u.id, u.name, u.email, u.role, u.auth_provider, u.last_login, u.created_at,
+    isAdmin
+      ? `SELECT u.id, u.name, u.email, u.role, u.auth_provider, u.last_login, u.created_at, u.family_id,
+              f.name AS family_name,
+              (SELECT COUNT(*) FROM medicines m WHERE m.user_id = u.id) AS meds_count,
+              (SELECT COUNT(*) FROM schedules s JOIN medicines m ON m.id = s.medicine_id WHERE m.user_id = u.id) AS schedules_count
+       FROM users u
+       LEFT JOIN families f ON f.id = u.family_id
+       ORDER BY f.name ASC NULLS LAST, u.name ASC`
+      : `SELECT u.id, u.name, u.email, u.role, u.auth_provider, u.last_login, u.created_at, u.family_id,
+            (SELECT name FROM families WHERE id = u.family_id) AS family_name,
             (SELECT COUNT(*) FROM medicines m WHERE m.user_id = u.id) AS meds_count,
             (SELECT COUNT(*) FROM schedules s JOIN medicines m ON m.id = s.medicine_id WHERE m.user_id = u.id) AS schedules_count
      FROM users u
      WHERE u.family_id = $1
      ORDER BY u.name ASC`,
-    [familyId]
+    isAdmin ? [] : [familyId]
   );
+  let familiesForFilter = [];
+  if (isAdmin) {
+    const famRes = await pool.query(`SELECT id, name FROM families ORDER BY name ASC`);
+    familiesForFilter = famRes.rows;
+  }
   let rows = users.rows;
   if (q) {
     rows = rows.filter(
       (u) =>
         (u.name || "").toLowerCase().includes(q) ||
-        (u.email || "").toLowerCase().includes(q)
+        (u.email || "").toLowerCase().includes(q) ||
+        (u.family_name || "").toLowerCase().includes(q)
     );
   }
   if (roleFilter) {
     rows = rows.filter((u) => u.role === roleFilter);
+  }
+  if (isAdmin && familyFilter) {
+    rows = rows.filter((u) => String(u.family_id) === familyFilter);
   }
   const msgHtml = msg === "deleted"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuario eliminado correctamente.</div>'
@@ -2603,7 +2672,12 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
         <a class="btn primary" href="/admin/user-new">➕ Nuevo usuario</a>
       </div>
       <form method="GET" action="/admin/users" class="users-filters">
-        <input name="q" type="search" placeholder="Buscar por nombre o email..." value="${escapeHtml(q)}" />
+        <input name="q" type="search" placeholder="Buscar por nombre, email${isAdmin ? " o familia" : ""}..." value="${escapeHtml(q)}" />
+        ${isAdmin && familiesForFilter.length ? `
+        <select name="family_id">
+          <option value="">Todas las familias</option>
+          ${familiesForFilter.map((f) => `<option value="${f.id}" ${familyFilter === String(f.id) ? "selected" : ""}>${escapeHtml(f.name || `Familia ${f.id}`)}</option>`).join("")}
+        </select>` : ""}
         <select name="role">
           <option value="">Todos los roles</option>
           <option value="admin" ${roleFilter === "admin" ? "selected" : ""}>Admin</option>
@@ -2617,8 +2691,8 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
           rows.length === 0
             ? `
           <div class="users-empty" style="grid-column:1/-1;">
-            <p>${q || roleFilter ? "No hay usuarios que coincidan con el filtro." : "Aún no hay usuarios. Añade el primero."}</p>
-            ${!q && !roleFilter ? '<a class="btn primary" href="/admin/user-new">➕ Crear primer usuario</a>' : '<a class="btn outline" href="/admin/users">Limpiar filtros</a>'}
+            <p>${q || roleFilter || familyFilter ? "No hay usuarios que coincidan con el filtro." : "Aún no hay usuarios. Añade el primero."}</p>
+            ${!q && !roleFilter && !familyFilter ? '<a class="btn primary" href="/admin/user-new">➕ Crear primer usuario</a>' : '<a class="btn outline" href="/admin/users">Limpiar filtros</a>'}
           </div>`
             : rows
                 .map((u) => {
@@ -2646,6 +2720,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
               <div class="user-meta">
                 <span class="user-badge role-${u.role || "user"}">${escapeHtml(u.role || "user")}</span>
                 <span class="user-badge auth">${escapeHtml(u.auth_provider || "email")}</span>
+                ${isAdmin && u.family_name ? `<span class="user-badge" style="background:#E0E7FF; color:#3730A3;">${escapeHtml(u.family_name)}</span>` : ""}
               </div>
               <div class="user-stats">${medsCount} medicamentos · ${schedCount} horarios · Último login: ${lastLogin}</div>
               <div class="user-actions">
@@ -2672,19 +2747,22 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
 
 app.post("/admin/user-delete/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const id = Number(req.params.id);
   const currentUserId = Number(req.user.sub);
   if (id === currentUserId) {
     return res.redirect("/admin/users?msg=cannot_delete_self");
   }
-  if (!Number.isFinite(id) || !familyId) {
+  if (!Number.isFinite(id)) {
     return res.redirect("/admin/users?msg=error");
   }
   try {
-    const result = await pool.query(
-      `DELETE FROM users WHERE id = $1 AND family_id = $2 RETURNING id`,
-      [id, familyId]
-    );
+    const result = isAdmin
+      ? await pool.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [id])
+      : await pool.query(
+          `DELETE FROM users WHERE id = $1 AND family_id = $2 RETURNING id`,
+          [id, familyId]
+        );
     if (result.rows.length === 0) {
       return res.redirect("/admin/users?msg=not_found");
     }
@@ -2697,14 +2775,17 @@ app.post("/admin/user-delete/:id", requireRoleHtml(["admin", "superuser"]), asyn
 
 app.post("/admin/resend-credentials/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || !familyId) {
+  if (!Number.isFinite(id)) {
     return res.redirect("/admin/users?msg=resend_fail");
   }
   try {
     const user = await pool.query(
-      `SELECT id, name, email, auth_provider FROM users WHERE id = $1 AND family_id = $2`,
-      [id, familyId]
+      isAdmin
+        ? `SELECT id, name, email, auth_provider, family_id FROM users WHERE id = $1`
+        : `SELECT id, name, email, auth_provider, family_id FROM users WHERE id = $1 AND family_id = $2`,
+      isAdmin ? [id] : [id, familyId]
     );
     if (user.rows.length === 0) {
       return res.redirect("/admin/users?msg=resend_fail");
@@ -2716,7 +2797,7 @@ app.post("/admin/resend-credentials/:id", requireRoleHtml(["admin", "superuser"]
     const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
     const hashed = await bcrypt.hash(tempPassword, 10);
     await pool.query(`UPDATE users SET password_hash = $1, must_change_password = true WHERE id = $2`, [hashed, id]);
-    const sent = await sendWelcomeEmailToUser(u.name, u.email, familyId, tempPassword, "de-CH");
+    const sent = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
     res.redirect("/admin/users?msg=" + (sent ? "resend_ok" : "resend_fail"));
   } catch (err) {
     console.error("[ADMIN RESEND CREDENTIALS]", err.message);
@@ -2915,23 +2996,27 @@ app.post("/admin/user-create", requireRoleHtml(["admin", "superuser"]), async (r
 
 app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const id = Number(req.params.id);
-  const [result, doctorResult] = await Promise.all([
-    pool.query(
-      `SELECT id, name, first_name, last_name, birth_date, street, house_number, postal_code, city, email, role,
-              disclaimer_accepted_at, disclaimer_ip, disclaimer_lang
-       FROM users WHERE id = $1 AND family_id = $2`,
-      [id, familyId]
-    ),
-    pool.query(
-      `SELECT * FROM doctors WHERE family_id = $1 AND user_id = $2`,
-      [familyId, id]
-    ),
-  ]);
+  const result = await pool.query(
+    isAdmin
+      ? `SELECT id, name, first_name, last_name, birth_date, street, house_number, postal_code, city, email, role, family_id,
+                disclaimer_accepted_at, disclaimer_ip, disclaimer_lang
+         FROM users WHERE id = $1`
+      : `SELECT id, name, first_name, last_name, birth_date, street, house_number, postal_code, city, email, role, family_id,
+                disclaimer_accepted_at, disclaimer_ip, disclaimer_lang
+         FROM users WHERE id = $1 AND family_id = $2`,
+    isAdmin ? [id] : [id, familyId]
+  );
   if (result.rows.length === 0) {
     return res.redirect("/admin/users");
   }
   const user = result.rows[0];
+  const userFamilyId = user.family_id || familyId;
+  const doctorResult = await pool.query(
+    `SELECT * FROM doctors WHERE family_id = $1 AND user_id = $2`,
+    [userFamilyId, id]
+  );
   const doctor = doctorResult.rows[0] || {};
   const fieldClass = 'class="form-control"';
   const content = `
@@ -3004,6 +3089,7 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
 
 app.post("/admin/user-save", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const {
     id,
     first_name,
@@ -3026,33 +3112,18 @@ app.post("/admin/user-save", requireRoleHtml(["admin", "superuser"]), async (req
   } = req.body || {};
   const safeRole = ["admin", "superuser", "user"].includes(role) ? role : "user";
   const finalName = buildUserName(null, first_name, last_name);
+  let targetFamilyId = familyId;
+  if (isAdmin) {
+    const u = await pool.query(`SELECT family_id FROM users WHERE id = $1`, [Number(id)]);
+    if (u.rows[0]) targetFamilyId = u.rows[0].family_id;
+  }
   await pool.query(
-    `UPDATE users
-     SET name = $1,
-         first_name = $2,
-         last_name = $3,
-         birth_date = $4,
-         street = $5,
-         house_number = $6,
-         postal_code = $7,
-         city = $8,
-         email = $9,
-         role = $10
-     WHERE id = $11 AND family_id = $12`,
-    [
-      finalName,
-      first_name || null,
-      last_name || null,
-      birth_date || null,
-      street || null,
-      house_number || null,
-      postal_code || null,
-      city || null,
-      email,
-      safeRole,
-      Number(id),
-      familyId,
-    ]
+    isAdmin
+      ? `UPDATE users SET name = $1, first_name = $2, last_name = $3, birth_date = $4, street = $5, house_number = $6, postal_code = $7, city = $8, email = $9, role = $10 WHERE id = $11`
+      : `UPDATE users SET name = $1, first_name = $2, last_name = $3, birth_date = $4, street = $5, house_number = $6, postal_code = $7, city = $8, email = $9, role = $10 WHERE id = $11 AND family_id = $12`,
+    isAdmin
+      ? [finalName, first_name || null, last_name || null, birth_date || null, street || null, house_number || null, postal_code || null, city || null, email, safeRole, Number(id)]
+      : [finalName, first_name || null, last_name || null, birth_date || null, street || null, house_number || null, postal_code || null, city || null, email, safeRole, Number(id), familyId]
   );
   if (
     doctor_first_name ||
@@ -3077,7 +3148,7 @@ app.post("/admin/user-save", requireRoleHtml(["admin", "superuser"]), async (req
          postal_code = EXCLUDED.postal_code,
          city = EXCLUDED.city`,
       [
-        familyId,
+        targetFamilyId,
         Number(id),
         doctor_first_name || null,
         doctor_last_name || null,
@@ -4705,7 +4776,7 @@ app.post("/api/billing/portal", requireAuth, async (req, res) => {
 });
 
 // Admin: sincronizar suscripción con Stripe
-app.post("/admin/billing/sync/:familyId", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.post("/admin/billing/sync/:familyId", requireRoleHtml(["admin"]), async (req, res) => {
   const familyId = Number(req.params.familyId);
   if (!stripe) return res.redirect("/admin/billing?msg=Stripe+no+configurado");
   try {
@@ -4734,7 +4805,7 @@ app.post("/admin/billing/sync/:familyId", requireRoleHtml(["admin", "superuser"]
 });
 
 // Admin: ver billing de todas las familias
-app.get("/admin/billing", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/billing", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const families = await pool.query(
       `SELECT f.id, f.name, f.subscription_status, f.trial_ends_at, f.subscription_start, f.subscription_end,
@@ -5711,7 +5782,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
   return false;
 }
 
-app.get("/admin/inactive-users", requireRoleHtml(["superuser"]), async (req, res) => {
+app.get("/admin/inactive-users", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const msg = req.query.msg;
     const count = req.query.count || "";
@@ -5814,7 +5885,7 @@ app.get("/admin/inactive-users", requireRoleHtml(["superuser"]), async (req, res
   }
 });
 
-app.post("/admin/delete-inactive-users", requireRoleHtml(["superuser"]), async (req, res) => {
+app.post("/admin/delete-inactive-users", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const ids = Array.isArray(req.body.user_ids) ? req.body.user_ids : req.body.user_ids ? [req.body.user_ids] : [];
     const numericIds = ids.map((x) => Number(x)).filter(Number.isFinite);
@@ -5843,7 +5914,7 @@ app.post("/admin/delete-inactive-users", requireRoleHtml(["superuser"]), async (
   }
 });
 
-app.post("/admin/resend-welcome-email", requireRoleHtml(["superuser"]), async (req, res) => {
+app.post("/admin/resend-welcome-email", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const userId = Number(req.body.user_id);
     if (!Number.isFinite(userId)) {
@@ -5873,7 +5944,7 @@ app.post("/admin/resend-welcome-email", requireRoleHtml(["superuser"]), async (r
   }
 });
 
-app.post("/admin/resend-welcome-email-all", requireRoleHtml(["superuser"]), async (req, res) => {
+app.post("/admin/resend-welcome-email-all", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const users = await pool.query(
       `SELECT u.id, u.name, u.email, u.family_id FROM users u
@@ -7101,6 +7172,7 @@ app.post("/admin/dose-requests/:id/reject", requireRoleHtml(["admin", "superuser
 app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) => {
   const emergency = req.query?.emergency === "1";
   const settingsMsg = req.query?.msg || "";
+  const isAdmin = req.user?.role === "admin";
   const content = `
     ${settingsMsg === "snapshot_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Snapshot creado correctamente.</p></div>' : ""}
     ${settingsMsg === "restored" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Base de datos restaurada correctamente desde backup.</p></div>' : ""}
@@ -7357,7 +7429,8 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
       </div>
     </div>
 
-    <!-- Backup / Snapshot / Restore -->
+    ${isAdmin ? `
+    <!-- Backup / Snapshot / Restore (solo admin) -->
     <div class="card" style="margin-top:16px;">
       <h1>💾 Backup y restauración</h1>
       <p class="muted" style="font-size:13px; margin-top:6px;">Exporta un backup completo de la base de datos o restaura desde un archivo JSON.</p>
@@ -7397,7 +7470,7 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
       </div>
     </div>
 
-    <!-- Ajustes avanzados -->
+    <!-- Ajustes avanzados (solo admin) -->
     <div class="card" style="margin-top:16px;">
       <h1>⚙ Ajustes avanzados</h1>
       <p class="muted" style="font-size:13px; margin-top:6px;">Opciones avanzadas desactivadas por defecto.</p>
@@ -7413,6 +7486,7 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
         <a class="btn ${emergency ? "primary" : "outline"} ${emergency ? "" : "disabled"}" href="/admin/logs">📜 Mirar logs</a>
       </div>
     </div>
+    ` : ""}
   `;
   res.send(renderShell(req, "Ajustes", "settings", content));
 });
@@ -7447,7 +7521,7 @@ async function exportTables(familyId, tableNames) {
 }
 
 // Full backup (JSON download)
-app.get("/admin/backup/full", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/backup/full", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const familyId = req.user.family_id;
     const data = await exportTables(familyId, BACKUP_TABLES);
@@ -7461,7 +7535,7 @@ app.get("/admin/backup/full", requireRoleHtml(["admin", "superuser"]), async (re
 });
 
 // Partial backups
-app.get("/admin/backup/medicines", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/backup/medicines", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const familyId = req.user.family_id;
     const data = await exportTables(familyId, ["medicines", "schedules", "dose_logs"]);
@@ -7474,7 +7548,7 @@ app.get("/admin/backup/medicines", requireRoleHtml(["admin", "superuser"]), asyn
   }
 });
 
-app.get("/admin/backup/schedules", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/backup/schedules", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const familyId = req.user.family_id;
     const data = await exportTables(familyId, ["schedules", "dose_logs"]);
@@ -7487,7 +7561,7 @@ app.get("/admin/backup/schedules", requireRoleHtml(["admin", "superuser"]), asyn
   }
 });
 
-app.get("/admin/backup/users", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/backup/users", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const familyId = req.user.family_id;
     const data = await exportTables(familyId, ["users", "doctors", "family_doctors"]);
@@ -7501,7 +7575,7 @@ app.get("/admin/backup/users", requireRoleHtml(["admin", "superuser"]), async (r
 });
 
 // Snapshot: save current state internally
-app.post("/admin/backup/snapshot", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.post("/admin/backup/snapshot", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const familyId = req.user.family_id;
     const description = (req.body?.description || "").trim() || "Snapshot manual";
@@ -7521,7 +7595,7 @@ app.post("/admin/backup/snapshot", requireRoleHtml(["admin", "superuser"]), asyn
 });
 
 // List snapshots
-app.get("/admin/backup/snapshots", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/backup/snapshots", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const familyId = req.user.family_id;
     await pool.query(`CREATE TABLE IF NOT EXISTS db_snapshots (
@@ -7567,7 +7641,7 @@ app.get("/admin/backup/snapshots", requireRoleHtml(["admin", "superuser"]), asyn
 });
 
 // Download a snapshot
-app.get("/admin/backup/snapshot-download/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/backup/snapshot-download/:id", requireRoleHtml(["admin"]), async (req, res) => {
   try {
     const familyId = req.user.family_id;
     const snap = await pool.query(`SELECT snapshot, description FROM db_snapshots WHERE id = $1 AND family_id = $2`, [req.params.id, familyId]);
@@ -7582,7 +7656,7 @@ app.get("/admin/backup/snapshot-download/:id", requireRoleHtml(["admin", "superu
 });
 
 // Restore from snapshot
-app.post("/admin/backup/snapshot-restore/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.post("/admin/backup/snapshot-restore/:id", requireRoleHtml(["admin"]), async (req, res) => {
   const client = await pool.connect();
   try {
     const familyId = req.user.family_id;
@@ -7599,7 +7673,7 @@ app.post("/admin/backup/snapshot-restore/:id", requireRoleHtml(["admin", "superu
 });
 
 // Restore from uploaded JSON file
-app.post("/admin/backup/restore", requireRoleHtml(["admin", "superuser"]), upload.single("file"), async (req, res) => {
+app.post("/admin/backup/restore", requireRoleHtml(["admin"]), upload.single("file"), async (req, res) => {
   const client = await pool.connect();
   try {
     if (req.body?.confirm !== "1") throw new Error("Debes confirmar la restauración.");
@@ -7684,7 +7758,7 @@ async function restoreFromBackup(client, familyId, data) {
   }
 }
 
-app.get("/admin/logs", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.get("/admin/logs", requireRoleHtml(["admin"]), async (req, res) => {
   const familyId = req.user.family_id;
   const userId = Number(req.query?.user_id || 0);
   const from = String(req.query?.from || "").trim();
@@ -7789,7 +7863,7 @@ app.get("/admin/logs", requireRoleHtml(["admin", "superuser"]), async (req, res)
   res.send(renderShell(req, "Logs de borrado", "settings", content));
 });
 
-app.post("/admin/logs/restore", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+app.post("/admin/logs/restore", requireRoleHtml(["admin"]), async (req, res) => {
   const familyId = req.user.family_id;
   const logId = Number(req.body?.log_id);
   if (!Number.isFinite(logId)) {
