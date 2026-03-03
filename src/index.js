@@ -12,6 +12,9 @@ const PDFDocument = require("pdfkit");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
+const passport = require("passport");
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
+const FacebookStrategy = require("passport-facebook").Strategy;
 const pg = require("pg");
 const { Pool } = pg;
 // Fix: devolver DATE (oid 1082) como string "YYYY-MM-DD" en vez de objeto Date
@@ -28,6 +31,12 @@ const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || "";
 const STRIPE_PRICE_ID_YEARLY = process.env.STRIPE_PRICE_ID_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+
+// OAuth config (Google, Facebook) — solo activo si están configuradas las credenciales
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+const FACEBOOK_APP_ID = process.env.FACEBOOK_APP_ID || "";
+const FACEBOOK_APP_SECRET = process.env.FACEBOOK_APP_SECRET || "";
 
 // Stripe webhook necesita raw body - ANTES de express.json()
 app.post("/api/billing/webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -116,6 +125,7 @@ app.post("/api/billing/webhook", express.raw({ type: "application/json" }), asyn
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+app.use(passport.initialize());
 const allowedOrigins = [
   /^http:\/\/localhost:\d+$/,
   /^http:\/\/192\.168\.\d+\.\d+:\d+$/,
@@ -315,6 +325,19 @@ async function ensureUserProfileColumns() {
 
 ensureUserProfileColumns().catch((error) => {
   console.error("ERROR: No se pudo actualizar perfil de users:", error.message);
+});
+
+async function ensureAuthProviderColumn() {
+  await pool.query(
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(32) NOT NULL DEFAULT 'email'`
+  );
+  await pool.query(
+    `UPDATE users SET auth_provider = 'email' WHERE auth_provider IS NULL`
+  );
+}
+
+ensureAuthProviderColumn().catch((error) => {
+  console.error("ERROR: No se pudo añadir auth_provider:", error.message);
 });
 
 async function ensureDoctorTables() {
@@ -1360,7 +1383,9 @@ function renderShell(req, title, active, content) {
     { key: "feedback", label: "⭐ Feedback", href: "/admin/feedback" },
     { key: "leads", label: "📩 Leads", href: "/admin/leads" },
     { key: "survey", label: "📋 Encuestas", href: "/admin/survey" },
+    { key: "feature-feedback", label: "💡 Feedback funciones", href: "/admin/feature-feedback" },
     { key: "online", label: "🟢 En línea", href: "/admin/online" },
+    { key: "inactive", label: "🗑 Usuarios inactivos", href: "/admin/inactive-users" },
     { key: "reports", label: "📊 Informes", href: "/admin/reports" },
     { key: "settings", label: "⚙ Ajustes", href: "/admin/settings" },
   ];
@@ -1837,6 +1862,116 @@ app.post("/auth/logout", (_req, res) => {
   });
   res.json({ ok: true });
 });
+
+// =============================================================================
+// OAUTH — Google, Facebook (Sign in with Apple requiere configuración adicional)
+// =============================================================================
+async function findOrCreateOAuthUser(profile, provider) {
+  const email = (profile.emails && profile.emails[0]?.value) || profile.email;
+  if (!email || !email.includes("@")) return null;
+
+  const cleanEmail = email.trim().toLowerCase();
+  const name = profile.displayName || profile.name?.givenName || profile.name?.familyName || cleanEmail.split("@")[0];
+
+  const existing = await pool.query(
+    `SELECT id, family_id, name, email, role FROM users WHERE email = $1 ORDER BY id ASC LIMIT 1`,
+    [cleanEmail]
+  );
+
+  if (existing.rows.length > 0) {
+    const user = existing.rows[0];
+    await pool.query(
+      `UPDATE users SET auth_provider = $1, last_login = NOW(), last_ip = $2 WHERE id = $3`,
+      [provider, null, user.id]
+    );
+    return user;
+  }
+
+  const oauthPlaceholder = await bcrypt.hash("oauth_no_password_" + crypto.randomBytes(8).toString("hex"), 10);
+  await pool.query("BEGIN");
+  const famResult = await pool.query(
+    `INSERT INTO families (name, subscription_status, trial_ends_at, max_medicines)
+     VALUES ($1, 'trial', NOW() + INTERVAL '7 days', 5)
+     RETURNING id`,
+    [`Familie ${name}`]
+  );
+  const familyId = famResult.rows[0].id;
+  const userResult = await pool.query(
+    `INSERT INTO users (family_id, name, email, password_hash, role, auth_provider, must_change_password)
+     VALUES ($1, $2, $3, $4, 'admin', $5, false)
+     RETURNING id, family_id, name, email, role`,
+    [familyId, name, cleanEmail, oauthPlaceholder, provider]
+  );
+  await pool.query("COMMIT");
+  return userResult.rows[0];
+}
+
+if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
+  passport.use(
+    new GoogleStrategy(
+      {
+        clientID: GOOGLE_CLIENT_ID,
+        clientSecret: GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL || `${process.env.BACKEND_PUBLIC_URL || "http://localhost:4000"}/auth/google/callback`,
+      },
+      async (_accessToken, _refreshToken, profile, done) => {
+        try {
+          const user = await findOrCreateOAuthUser(profile, "google");
+          done(null, user);
+        } catch (err) {
+          done(err, null);
+        }
+      }
+    )
+  );
+  app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
+  app.get(
+    "/auth/google/callback",
+    passport.authenticate("google", { session: false }),
+    (req, res) => {
+      const user = req.user;
+      if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
+      const token = signToken(user);
+      res.cookie(TOKEN_NAME, token, cookieOpts(req));
+      res.redirect(FRONTEND_URL + "?oauth=ok");
+    }
+  );
+  console.log("[OAUTH] Google configurado");
+}
+
+if (FACEBOOK_APP_ID && FACEBOOK_APP_SECRET) {
+  passport.use(
+    new FacebookStrategy(
+      {
+        clientID: FACEBOOK_APP_ID,
+        clientSecret: FACEBOOK_APP_SECRET,
+        callbackURL: process.env.FACEBOOK_CALLBACK_URL || `${process.env.BACKEND_PUBLIC_URL || "http://localhost:4000"}/auth/facebook/callback`,
+        profileFields: ["id", "displayName", "emails"],
+      },
+      async (_accessToken, _refreshToken, profile, done) => {
+        try {
+          const user = await findOrCreateOAuthUser(profile, "facebook");
+          done(null, user);
+        } catch (err) {
+          done(err, null);
+        }
+      }
+    )
+  );
+  app.get("/auth/facebook", passport.authenticate("facebook", { scope: ["email"] }));
+  app.get(
+    "/auth/facebook/callback",
+    passport.authenticate("facebook", { session: false }),
+    (req, res) => {
+      const user = req.user;
+      if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
+      const token = signToken(user);
+      res.cookie(TOKEN_NAME, token, cookieOpts(req));
+      res.redirect(FRONTEND_URL + "?oauth=ok");
+    }
+  );
+  console.log("[OAUTH] Facebook configurado");
+}
 
 app.post("/auth/forgot", async (req, res) => {
   const { family_id, email } = req.body || {};
@@ -3213,7 +3348,7 @@ app.get("/api/users", requireRole(["admin", "superuser"]), async (req, res) => {
   }
   try {
     const result = await pool.query(
-      `SELECT id, family_id, name, first_name, last_name, street, house_number, postal_code, city, email, role, created_at
+      `SELECT id, family_id, name, first_name, last_name, street, house_number, postal_code, city, email, role, auth_provider, created_at
        FROM users
        WHERE family_id = $1
        ORDER BY id DESC`,
@@ -4510,6 +4645,40 @@ app.post("/api/survey", async (req, res) => {
 });
 
 // =============================================================================
+// FEATURE FEEDBACK (Care landing - future features validation) - PUBLIC
+// =============================================================================
+app.post("/api/feature-feedback", async (req, res) => {
+  const { features, email, comment, lang, source } = req.body || {};
+  if (!Array.isArray(features)) return res.status(400).json({ error: "features must be array" });
+
+  try {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS feature_feedback (
+        id SERIAL PRIMARY KEY,
+        features JSONB,
+        email VARCHAR(255),
+        comment TEXT,
+        lang VARCHAR(10),
+        source VARCHAR(50),
+        ip VARCHAR(50),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )`
+    );
+    await pool.query(
+      `INSERT INTO feature_feedback (features, email, comment, lang, source, ip)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [JSON.stringify(features), email?.trim()?.toLowerCase() || null, comment || null, lang || "de-CH", source || "care",
+       req.headers["x-forwarded-for"] || req.ip || null]
+    );
+    console.log(`[FEATURE-FEEDBACK] ${features.length} features from ${email || "anon"}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[FEATURE-FEEDBACK]", err.message);
+    res.status(500).json({ error: "Error saving feedback" });
+  }
+});
+
+// =============================================================================
 // AUTO-REGISTER TRIAL — Creates family + user + trial from landing page
 // =============================================================================
 app.post("/api/register-trial", async (req, res) => {
@@ -4541,8 +4710,8 @@ app.post("/api/register-trial", async (req, res) => {
     const familyId = famResult.rows[0].id;
 
     const userResult = await pool.query(
-      `INSERT INTO users (family_id, name, email, password_hash, role, must_change_password)
-       VALUES ($1, $2, $3, $4, 'admin', true)
+      `INSERT INTO users (family_id, name, email, password_hash, role, must_change_password, auth_provider)
+       VALUES ($1, $2, $3, $4, 'admin', true, 'email')
        RETURNING id, family_id, name, email, role`,
       [familyId, cleanName, cleanEmail, hashed]
     );
@@ -4950,6 +5119,110 @@ app.get("/admin/survey", requireRoleHtml(["admin", "superuser"]), async (req, re
 });
 
 // =============================================================================
+// ADMIN FEATURE FEEDBACK (Care landing - future features validation)
+// =============================================================================
+const FEATURE_LABELS = {
+  interactions: "Interacciones",
+  dependency: "Riesgo dependencia",
+  side_effects: "Efectos adversos",
+  blood_pressure: "Presión arterial",
+  heart_rate: "Pulsación",
+  pdf_report: "PDF para médico",
+  ai_assistant: "Asistente IA",
+};
+app.get("/admin/feature-feedback", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS feature_feedback (
+      id SERIAL PRIMARY KEY, features JSONB, email VARCHAR(255), comment TEXT,
+      lang VARCHAR(10), source VARCHAR(50), ip VARCHAR(50), created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    const rows = (await pool.query(`SELECT * FROM feature_feedback ORDER BY created_at DESC LIMIT 500`)).rows;
+    const total = rows.length;
+    const today = rows.filter(r => new Date(r.created_at).toDateString() === new Date().toDateString()).length;
+    const week = rows.filter(r => new Date(r.created_at) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)).length;
+
+    const featureCounts = {};
+    rows.forEach(r => {
+      const arr = Array.isArray(r.features) ? r.features : (r.features ? JSON.parse(r.features || "[]") : []);
+      arr.forEach(f => { featureCounts[f] = (featureCounts[f] || 0) + 1; });
+    });
+
+    const barFeature = (id) => {
+      const c = featureCounts[id] || 0;
+      const pct = total > 0 ? Math.round((c / total) * 100) : 0;
+      const maxVal = Math.max(...Object.values(featureCounts), 1);
+      const w = total > 0 ? Math.round((c / maxVal) * 100) : 0;
+      return `
+        <div style="margin-bottom:8px;">
+          <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:2px;">
+            <span style="color:#475569;">${FEATURE_LABELS[id] || id}</span>
+            <span style="color:#64748b; font-weight:bold;">${c} (${pct}%)</span>
+          </div>
+          <div style="background:#f1f5f9; border-radius:6px; height:20px; overflow:hidden;">
+            <div style="background:linear-gradient(90deg,#8b5cf6,#a855f7); height:100%; width:${w}%; border-radius:6px;"></div>
+          </div>
+        </div>`;
+    };
+
+    const content = `
+      <div class="card">
+        <h1>💡 Feedback de Funciones</h1>
+        <p class="muted" style="margin-bottom:16px;">Interés en futuras funciones desde la landing /care.</p>
+        <div style="display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap;">
+          <div style="background:#f5f3ff; border:1px solid #c4b5fd; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#7c3aed;">${total}</div>
+            <div style="font-size:11px; color:#5b21b6;">Total</div>
+          </div>
+          <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#2563eb;">${week}</div>
+            <div style="font-size:11px; color:#1e40af;">Esta semana</div>
+          </div>
+          <div style="background:#fffbeb; border:1px solid #fbbf24; border-radius:8px; padding:12px 16px; text-align:center; min-width:100px;">
+            <div style="font-size:24px; font-weight:bold; color:#92400e;">${today}</div>
+            <div style="font-size:11px; color:#92400e;">Hoy</div>
+          </div>
+        </div>
+
+        ${total === 0 ? '<p style="color:#94a3b8; text-align:center; padding:32px;">Aún no hay feedback de funciones.</p>' : `
+          <div style="background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:16px; margin-bottom:20px;">
+            <h3 style="font-size:14px; font-weight:bold; color:#0f172a; margin:0 0 12px;">Interés por función</h3>
+            ${Object.keys(FEATURE_LABELS).map(id => barFeature(id)).join("")}
+          </div>
+
+          <h2 style="font-size:16px; font-weight:bold; color:#0f172a; margin:24px 0 12px;">Respuestas individuales</h2>
+          <div style="overflow:auto;">
+            <table class="table">
+              <thead>
+                <tr><th>Fecha</th><th>Funciones</th><th>Email</th><th>Comentario</th><th>Idioma</th><th>Origen</th></tr>
+              </thead>
+              <tbody>
+                ${rows.map(r => {
+                  const arr = Array.isArray(r.features) ? r.features : (r.features ? JSON.parse(r.features || "[]") : []);
+                  const featStr = arr.map(f => FEATURE_LABELS[f] || f).join(", ") || "-";
+                  return `
+                  <tr>
+                    <td style="white-space:nowrap; font-size:11px;">${new Date(r.created_at).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                    <td style="font-size:12px; max-width:200px;">${escapeHtml(featStr)}</td>
+                    <td style="font-size:12px;">${r.email ? '<a href="mailto:' + escapeHtml(r.email) + '" style="color:#2563eb;">' + escapeHtml(r.email) + '</a>' : "-"}</td>
+                    <td style="font-size:12px; max-width:180px;">${r.comment ? escapeHtml(r.comment).substring(0, 80) + (r.comment.length > 80 ? "…" : "") : "-"}</td>
+                    <td>${r.lang || "-"}</td>
+                    <td>${r.source || "-"}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>
+        `}
+      </div>
+    `;
+    res.send(renderShell(req, "Feedback funciones", "feature-feedback", content));
+  } catch (err) {
+    console.error("[ADMIN FEATURE-FEEDBACK]", err.message);
+    res.status(500).send("Error al cargar feedback de funciones");
+  }
+});
+
+// =============================================================================
 // ADMIN ONLINE USERS (real-time)
 // =============================================================================
 app.get("/admin/online", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
@@ -5044,6 +5317,299 @@ app.get("/admin/online", requireRoleHtml(["admin", "superuser"]), async (req, re
   } catch (err) {
     console.error("[ADMIN ONLINE]", err.message);
     res.status(500).send("Error al cargar usuarios en línea");
+  }
+});
+
+// =============================================================================
+// ADMIN INACTIVE USERS — Usuarios que se registraron pero nunca iniciaron sesión
+// =============================================================================
+const INACTIVE_DAYS = Number(process.env.INACTIVE_USER_DAYS) || 7;
+
+async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang) {
+  if (!mailTransport) return false;
+  const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
+  const translations = {
+    "de-CH": {
+      subject: "Willkommen bei MediControl — Ihre Zugangsdaten",
+      greeting: `Hallo ${name}`,
+      intro: "Vielen Dank für Ihre Registrierung bei MediControl! Ihr 7-Tage-Testversion ist aktiv.",
+      credentials: "Ihre Zugangsdaten",
+      family_id: "Family ID",
+      email_label: "E-Mail",
+      password: "Temporäres Passwort",
+      change_pw: "Bitte ändern Sie Ihr Passwort beim ersten Login.",
+      steps_title: "So starten Sie",
+      step1: `Öffnen Sie <a href="${FRONTEND}">${FRONTEND}</a>`,
+      step2: `Geben Sie Family ID: <strong>${familyId}</strong>, E-Mail und Passwort ein`,
+      step3: "Ändern Sie Ihr Passwort",
+      step4: "Fügen Sie Ihre Medikamente hinzu (manuell oder per Rezept-Scan)",
+      step5: "Aktivieren Sie Push-Benachrichtigungen für Erinnerungen",
+      trial_info: "Ihre kostenlose Testversion läuft 7 Tage mit bis zu 5 Medikamenten.",
+      cta: "Jetzt anmelden",
+    },
+    es: {
+      subject: "Bienvenido a MediControl — Tus datos de acceso",
+      greeting: `Hola ${name}`,
+      intro: "Gracias por registrarte en MediControl. Tu prueba gratuita de 7 días está activa.",
+      credentials: "Tus datos de acceso",
+      family_id: "Family ID",
+      email_label: "Email",
+      password: "Contraseña temporal",
+      change_pw: "Por favor cambia tu contraseña en el primer login.",
+      steps_title: "Cómo empezar",
+      step1: `Abre <a href="${FRONTEND}">${FRONTEND}</a>`,
+      step2: `Ingresa Family ID: <strong>${familyId}</strong>, email y contraseña`,
+      step3: "Cambia tu contraseña",
+      step4: "Añade tus medicamentos (manual o escaneando receta)",
+      step5: "Activa las notificaciones push para recordatorios",
+      trial_info: "Tu prueba gratuita dura 7 días con hasta 5 medicamentos.",
+      cta: "Iniciar sesión",
+    },
+    en: {
+      subject: "Welcome to MediControl — Your login details",
+      greeting: `Hello ${name}`,
+      intro: "Thank you for signing up for MediControl! Your 7-day free trial is active.",
+      credentials: "Your login details",
+      family_id: "Family ID",
+      email_label: "Email",
+      password: "Temporary password",
+      change_pw: "Please change your password on first login.",
+      steps_title: "How to get started",
+      step1: `Open <a href="${FRONTEND}">${FRONTEND}</a>`,
+      step2: `Enter Family ID: <strong>${familyId}</strong>, email and password`,
+      step3: "Change your password",
+      step4: "Add your medications (manually or by scanning a prescription)",
+      step5: "Enable push notifications for reminders",
+      trial_info: "Your free trial lasts 7 days with up to 5 medications.",
+      cta: "Sign in now",
+    },
+  };
+  const t = translations[lang] || translations["de-CH"];
+  const emailHtml = `
+    <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+      <div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%); border-radius:16px; padding:32px; text-align:center; margin-bottom:24px;">
+        <h1 style="color:#34d399; font-size:28px; margin:0;">MediControl</h1>
+        <p style="color:#94a3b8; font-size:14px; margin-top:8px;">Ihre Medikamente. Unter Kontrolle.</p>
+      </div>
+      <h2 style="color:#0f172a;">${t.greeting}!</h2>
+      <p style="color:#475569; font-size:14px;">${t.intro}</p>
+      <div style="background:#f0fdf4; border:2px solid #34d399; border-radius:12px; padding:20px; margin:20px 0;">
+        <h3 style="color:#166534; margin:0 0 12px;">${t.credentials}</h3>
+        <table style="width:100%; font-size:14px;">
+          <tr><td style="color:#64748b; padding:4px 0;">${t.family_id}:</td><td style="font-weight:bold; color:#0f172a;">${familyId}</td></tr>
+          <tr><td style="color:#64748b; padding:4px 0;">${t.email_label}:</td><td style="font-weight:bold; color:#0f172a;">${email}</td></tr>
+          <tr><td style="color:#64748b; padding:4px 0;">${t.password}:</td><td style="font-weight:bold; color:#dc2626; font-family:monospace; font-size:16px;">${tempPassword}</td></tr>
+        </table>
+        <p style="color:#dc2626; font-size:12px; margin-top:8px;">⚠️ ${t.change_pw}</p>
+      </div>
+      <h3 style="color:#0f172a;">${t.steps_title}:</h3>
+      <ol style="color:#475569; font-size:14px; line-height:1.8;">
+        <li>${t.step1}</li>
+        <li>${t.step2}</li>
+        <li>${t.step3}</li>
+        <li>${t.step4}</li>
+        <li>${t.step5}</li>
+      </ol>
+      <p style="color:#64748b; font-size:13px; background:#f8fafc; border-radius:8px; padding:12px;">${t.trial_info}</p>
+      <div style="text-align:center; margin:24px 0;">
+        <a href="${FRONTEND}" style="display:inline-block; background:#007AFF; color:white; text-decoration:none; padding:14px 36px; border-radius:12px; font-weight:bold; font-size:16px;">${t.cta}</a>
+      </div>
+      <p style="color:#94a3b8; font-size:11px; text-align:center;">© ${new Date().getFullYear()} MediControl. Swiss Quality Software.</p>
+    </div>`;
+  try {
+    await Promise.race([
+      mailTransport.sendMail({ from: process.env.SMTP_USER, to: email, subject: t.subject, html: emailHtml }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
+    ]);
+    return true;
+  } catch (e) {
+    console.error("[RESEND WELCOME] Email error:", e.message);
+    return false;
+  }
+}
+
+app.get("/admin/inactive-users", requireRoleHtml(["superuser"]), async (req, res) => {
+  try {
+    const msg = req.query.msg;
+    const count = req.query.count || "";
+    const failed = req.query.failed || "";
+    const msgHtml = msg === "deleted"
+      ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuarios borrados correctamente.</div>'
+      : msg === "resend_ok"
+      ? `<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Email de bienvenida reenviado correctamente${count ? ` (${count} enviados)` : ""}${failed ? `. ${failed} fallaron (revisa SMTP).` : ""}</div>`
+      : msg === "resend_fail"
+      ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa la configuración SMTP.</div>'
+      : msg === "no_selection"
+      ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Selecciona al menos un usuario.</div>'
+      : "";
+
+    const users = await pool.query(
+      `SELECT u.id, u.name, u.email, u.auth_provider, u.created_at, u.last_login, u.last_activity,
+             f.name AS family_name, f.id AS family_id
+       FROM users u
+       LEFT JOIN families f ON f.id = u.family_id
+       WHERE u.last_login IS NULL
+       ORDER BY u.created_at ASC`
+    );
+
+    const content = `
+      <div class="card">
+        ${msgHtml}
+        <h1>🗑 Usuarios inactivos / no verificados</h1>
+        <p class="muted" style="margin-bottom:16px;">
+          Usuarios que se registraron online pero <strong>nunca iniciaron sesión</strong>.
+          Puedes reenviar el email de bienvenida o borrarlos.
+        </p>
+
+        <div style="background:#eff6ff; border:1px solid #3b82f6; border-radius:12px; padding:12px 16px; margin-bottom:12px;">
+          <strong>📧 Reenviar:</strong> Genera una nueva contraseña y envía el email de bienvenida. Solo para usuarios con auth_provider=email.
+        </div>
+        <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:12px; padding:12px 16px; margin-bottom:20px;">
+          <strong>⚠️ Borrar:</strong> Elimina el usuario y su familia (si queda vacía). Usuarios con más de ${INACTIVE_DAYS} días.
+        </div>
+
+        ${users.rows.filter(u => u.auth_provider === "email" || !u.auth_provider).length > 0 ? `
+        <form method="POST" action="/admin/resend-welcome-email-all" style="display:inline; margin-bottom:16px;">
+          <button type="submit" class="btn primary" onclick="return confirm('¿Reenviar email a TODOS los usuarios de la lista?');">
+            📧 Reenviar email a todos (${users.rows.filter(u => u.auth_provider === "email" || !u.auth_provider).length})
+          </button>
+        </form>
+        ` : ""}
+
+        <form method="POST" action="/admin/delete-inactive-users" onsubmit="return confirm('¿Borrar los usuarios seleccionados? Esta acción no se puede deshacer.');">
+          <div style="overflow:auto;">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th><input type="checkbox" id="selectAll" onclick="document.querySelectorAll('.user-cb').forEach(c=>c.checked=this.checked)" /></th>
+                  <th>ID</th>
+                  <th>Nombre</th>
+                  <th>Email</th>
+                  <th>Proveedor</th>
+                  <th>Familia</th>
+                  <th>Registro</th>
+                  <th>Acción</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${users.rows.length === 0
+                  ? `<tr><td colspan="8" style="text-align:center; padding:32px; color:#94a3b8;">No hay usuarios sin login.</td></tr>`
+                  : users.rows.map((u) => {
+                    const canResend = u.auth_provider === "email" || !u.auth_provider;
+                    const isOldEnough = u.created_at && (Date.now() - new Date(u.created_at).getTime()) > INACTIVE_DAYS * 24 * 60 * 60 * 1000;
+                    return `
+                <tr>
+                  <td>${isOldEnough ? `<input type="checkbox" name="user_ids" value="${u.id}" class="user-cb" />` : ""}</td>
+                  <td>${u.id}</td>
+                  <td>${escapeHtml(u.name || "-")}</td>
+                  <td><a href="mailto:${escapeHtml(u.email)}">${escapeHtml(u.email)}</a></td>
+                  <td><span class="badge ${u.auth_provider === "email" ? "info" : "warn"}">${escapeHtml(u.auth_provider || "email")}</span></td>
+                  <td>${escapeHtml(u.family_name || "-")} (${u.family_id || "-"})</td>
+                  <td style="font-size:11px;">${u.created_at ? new Date(u.created_at).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "-"}</td>
+                  <td>${canResend ? `<form method="POST" action="/admin/resend-welcome-email" style="display:inline;"><input type="hidden" name="user_id" value="${u.id}" /><button type="submit" class="btn outline" style="padding:6px 12px; font-size:12px;">Reenviar email</button></form>` : "-"}</td>
+                </tr>`;
+                  }).join("")}
+              </tbody>
+            </table>
+          </div>
+          ${users.rows.some(u => u.created_at && (Date.now() - new Date(u.created_at).getTime()) > INACTIVE_DAYS * 24 * 60 * 60 * 1000) ? `
+          <div style="margin-top:16px;">
+            <button type="submit" class="btn critical">Borrar seleccionados</button>
+          </div>` : ""}
+        </form>
+
+        <details style="margin-top:24px; border:1px solid var(--border); border-radius:12px; padding:16px;">
+          <summary style="cursor:pointer; font-weight:600;">📋 Lista de usuarios (copiar)</summary>
+          <pre style="margin-top:12px; font-size:12px; overflow:auto; max-height:300px; background:#f8fafc; padding:12px; border-radius:8px;">${users.rows.map(u => `${u.family_name || "-"}\t${u.email}\t${u.name || "-"}\tID:${u.id}\tFamilie:${u.family_id}`).join("\n") || "(vacío)"}</pre>
+        </details>
+      </div>
+    `;
+    res.send(renderShell(req, "Usuarios inactivos", "inactive", content));
+  } catch (err) {
+    console.error("[ADMIN INACTIVE]", err.message);
+    res.status(500).send("Error al cargar usuarios inactivos");
+  }
+});
+
+app.post("/admin/delete-inactive-users", requireRoleHtml(["superuser"]), async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.user_ids) ? req.body.user_ids : req.body.user_ids ? [req.body.user_ids] : [];
+    const numericIds = ids.map((x) => Number(x)).filter(Number.isFinite);
+    if (numericIds.length === 0) {
+      return res.redirect("/admin/inactive-users?msg=no_selection");
+    }
+
+    for (const id of numericIds) {
+      const user = await pool.query(
+        `SELECT u.id, u.family_id FROM users u WHERE u.id = $1 AND u.last_login IS NULL`,
+        [id]
+      );
+      if (user.rows.length > 0) {
+        const familyId = user.rows[0].family_id;
+        await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+        const familyCount = await pool.query(`SELECT COUNT(*) FROM users WHERE family_id = $1`, [familyId]);
+        if (Number(familyCount.rows[0].count) === 0) {
+          await pool.query(`DELETE FROM families WHERE id = $1`, [familyId]);
+        }
+      }
+    }
+    res.redirect("/admin/inactive-users?msg=deleted");
+  } catch (err) {
+    console.error("[ADMIN DELETE INACTIVE]", err.message);
+    res.status(500).send("Error al borrar usuarios");
+  }
+});
+
+app.post("/admin/resend-welcome-email", requireRoleHtml(["superuser"]), async (req, res) => {
+  try {
+    const userId = Number(req.body.user_id);
+    if (!Number.isFinite(userId)) {
+      return res.redirect("/admin/inactive-users?msg=resend_fail");
+    }
+    const user = await pool.query(
+      `SELECT u.id, u.name, u.email, u.family_id, u.auth_provider
+       FROM users u
+       WHERE u.id = $1 AND u.last_login IS NULL`,
+      [userId]
+    );
+    if (user.rows.length === 0) {
+      return res.redirect("/admin/inactive-users?msg=resend_fail");
+    }
+    const u = user.rows[0];
+    if (u.auth_provider && u.auth_provider !== "email") {
+      return res.redirect("/admin/inactive-users?msg=resend_fail");
+    }
+    const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
+    const hashed = await bcrypt.hash(tempPassword, 10);
+    await pool.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hashed, userId]);
+    const sent = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
+    res.redirect("/admin/inactive-users?msg=" + (sent ? "resend_ok" : "resend_fail"));
+  } catch (err) {
+    console.error("[ADMIN RESEND WELCOME]", err.message);
+    res.redirect("/admin/inactive-users?msg=resend_fail");
+  }
+});
+
+app.post("/admin/resend-welcome-email-all", requireRoleHtml(["superuser"]), async (req, res) => {
+  try {
+    const users = await pool.query(
+      `SELECT u.id, u.name, u.email, u.family_id FROM users u
+       WHERE u.last_login IS NULL AND (u.auth_provider = 'email' OR u.auth_provider IS NULL)`
+    );
+    let sent = 0;
+    let failed = 0;
+    for (const u of users.rows) {
+      const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
+      const hashed = await bcrypt.hash(tempPassword, 10);
+      await pool.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hashed, u.id]);
+      const ok = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
+      if (ok) sent++; else failed++;
+    }
+    const msg = sent > 0 ? `resend_ok&count=${sent}` : "resend_fail";
+    res.redirect("/admin/inactive-users?msg=" + msg + (failed > 0 ? `&failed=${failed}` : ""));
+  } catch (err) {
+    console.error("[ADMIN RESEND WELCOME ALL]", err.message);
+    res.redirect("/admin/inactive-users?msg=resend_fail");
   }
 });
 
