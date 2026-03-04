@@ -749,7 +749,7 @@ async function ensureBillingColumns() {
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50) NOT NULL DEFAULT 'trial'`,
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_start TIMESTAMPTZ`,
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS subscription_end TIMESTAMPTZ`,
-    `ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '7 days')`,
+    `ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '30 days')`,
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS trial_email_sent BOOLEAN DEFAULT FALSE`,
     `ALTER TABLE families ADD COLUMN IF NOT EXISTS max_medicines INTEGER DEFAULT 5`,
   ];
@@ -760,7 +760,7 @@ async function ensureBillingColumns() {
   }
   // Set trial for existing families without status
   await pool.query(
-    `UPDATE families SET trial_ends_at = NOW() + INTERVAL '7 days' WHERE trial_ends_at IS NULL AND subscription_status = 'trial'`
+    `UPDATE families SET trial_ends_at = NOW() + INTERVAL '30 days' WHERE trial_ends_at IS NULL AND subscription_status = 'trial'`
   );
 }
 ensureBillingColumns().catch((e) => console.error("ERROR billing columns:", e.message));
@@ -1891,12 +1891,12 @@ app.post("/auth/login", async (req, res) => {
     // Si se envía family_id, usarlo. Si no, buscar por email (email es único por usuario).
     const result = family_id
       ? await pool.query(
-          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password
+          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password, auth_provider
            FROM users WHERE family_id = $1 AND email = $2`,
           [Number(family_id), email]
         )
       : await pool.query(
-          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password
+          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password, auth_provider
            FROM users WHERE email = $1`,
           [email]
         );
@@ -1905,6 +1905,12 @@ app.post("/auth/login", async (req, res) => {
     }
 
     const user = result.rows[0];
+    // Si el usuario se registró con Google/Facebook, no tiene contraseña válida
+    if (user.auth_provider && user.auth_provider !== "email") {
+      return res.status(401).json({
+        error: `Esta cuenta usa inicio de sesión con ${user.auth_provider === "google" ? "Google" : "Facebook"}. Usa el botón correspondiente en lugar de email/contraseña.`,
+      });
+    }
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) {
       return res.status(401).json({ error: "credenciales inválidas" });
@@ -1970,7 +1976,7 @@ async function findOrCreateOAuthUser(profile, provider) {
   await pool.query("BEGIN");
   const famResult = await pool.query(
     `INSERT INTO families (name, subscription_status, trial_ends_at, max_medicines)
-     VALUES ($1, 'trial', NOW() + INTERVAL '7 days', 5)
+     VALUES ($1, 'trial', NOW() + INTERVAL '30 days', 5)
      RETURNING id`,
     [`Familie ${name}`]
   );
@@ -5085,7 +5091,7 @@ app.post("/api/register-trial", async (req, res) => {
 
     const famResult = await pool.query(
       `INSERT INTO families (name, subscription_status, trial_ends_at, max_medicines)
-       VALUES ($1, 'trial', NOW() + INTERVAL '7 days', 5)
+       VALUES ($1, 'trial', NOW() + INTERVAL '30 days', 5)
        RETURNING id`,
       [`Familie ${cleanName}`]
     );
@@ -5120,7 +5126,7 @@ app.post("/api/register-trial", async (req, res) => {
         "de-CH": {
           subject: "Willkommen bei MediControl — Ihre Zugangsdaten",
           greeting: `Hallo ${cleanName}`,
-          intro: "Vielen Dank für Ihre Registrierung bei MediControl! Ihr 7-Tage-Testversion ist aktiv.",
+          intro: "Vielen Dank für Ihre Registrierung bei MediControl! Ihre 30-Tage-Testversion ist aktiv.",
           credentials: "Ihre Zugangsdaten",
           family_id: "Family ID",
           email_label: "E-Mail",
@@ -5132,7 +5138,7 @@ app.post("/api/register-trial", async (req, res) => {
           step3: "Ändern Sie Ihr Passwort",
           step4: "Fügen Sie Ihre Medikamente hinzu (manuell oder per Rezept-Scan)",
           step5: "Aktivieren Sie Push-Benachrichtigungen für Erinnerungen",
-          trial_info: "Ihre kostenlose Testversion läuft 7 Tage mit bis zu 5 Medikamenten.",
+          trial_info: "Ihre kostenlose Testversion läuft 30 Tage mit maximal 5 Medikamenten.",
           cta: "Jetzt anmelden",
           guide_title: "📄 Hilfe-Guide als PDF",
           guide_intro: "Laden Sie die Anleitung in Ihrer Sprache herunter:",
@@ -5143,7 +5149,7 @@ app.post("/api/register-trial", async (req, res) => {
         es: {
           subject: "Bienvenido a MediControl — Tus datos de acceso",
           greeting: `Hola ${cleanName}`,
-          intro: "Gracias por registrarte en MediControl. Tu prueba gratuita de 7 días está activa.",
+          intro: "Gracias por registrarte en MediControl. Tu prueba gratuita de 30 días está activa.",
           credentials: "Tus datos de acceso",
           family_id: "Family ID",
           email_label: "Email",
@@ -5155,7 +5161,7 @@ app.post("/api/register-trial", async (req, res) => {
           step3: "Cambia tu contraseña",
           step4: "Añade tus medicamentos (manual o escaneando receta)",
           step5: "Activa las notificaciones push para recordatorios",
-          trial_info: "Tu prueba gratuita dura 7 días con hasta 5 medicamentos.",
+          trial_info: "Tu prueba gratuita dura 30 días con máximo 5 medicamentos.",
           cta: "Iniciar sesión",
           guide_title: "📄 Guía de ayuda en PDF",
           guide_intro: "Descarga la guía de usuario en tu idioma:",
@@ -5166,7 +5172,7 @@ app.post("/api/register-trial", async (req, res) => {
         en: {
           subject: "Welcome to MediControl — Your login details",
           greeting: `Hello ${cleanName}`,
-          intro: "Thank you for signing up for MediControl! Your 7-day free trial is active.",
+          intro: "Thank you for signing up for MediControl! Your 30-day free trial is active.",
           credentials: "Your login details",
           family_id: "Family ID",
           email_label: "Email",
@@ -5178,7 +5184,7 @@ app.post("/api/register-trial", async (req, res) => {
           step3: "Change your password",
           step4: "Add your medications (manually or by scanning a prescription)",
           step5: "Enable push notifications for reminders",
-          trial_info: "Your free trial lasts 7 days with up to 5 medications.",
+          trial_info: "Your free trial lasts 30 days with max. 5 medications.",
           cta: "Sign in now",
           guide_title: "📄 Help guide in PDF",
           guide_intro: "Download the user guide in your preferred language:",
@@ -5328,7 +5334,7 @@ app.post("/api/leads", async (req, res) => {
           <p style="color:#475569; font-size:14px;">Wir haben Ihre Anfrage erhalten. Sie werden benachrichtigt, sobald die App verfügbar ist.</p>
           <p style="color:#475569; font-size:14px;">Hemos recibido su solicitud. Le notificaremos cuando la app esté disponible.</p>
           <div style="background:#f8fafc; border-radius:12px; padding:20px; margin:20px 0; text-align:center;">
-            <p style="font-size:16px; font-weight:bold; color:#0f172a;">Kostenlose 7-Tage-Testversion / Prueba gratuita de 7 días</p>
+            <p style="font-size:16px; font-weight:bold; color:#0f172a;">Kostenlose 30-Tage-Testversion / Prueba gratuita de 30 días</p>
             <a href="${FRONTEND_URL}" style="display:inline-block; background:#007AFF; color:white; text-decoration:none; padding:12px 32px; border-radius:12px; font-weight:bold; margin-top:12px;">Jetzt testen / Probar ahora</a>
           </div>
           <p style="color:#94a3b8; font-size:11px; text-align:center;">SaaS-Service nach Schweizer Recht. © ${new Date().getFullYear()} MediControl</p>
@@ -5787,7 +5793,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       step3: "Ändern Sie Ihr Passwort",
       step4: "Fügen Sie Ihre Medikamente hinzu (manuell oder per Rezept-Scan)",
       step5: "Aktivieren Sie Push-Benachrichtigungen für Erinnerungen",
-      trial_info: "Ihre kostenlose Testversion läuft 7 Tage mit bis zu 5 Medikamenten.",
+      trial_info: "Ihre kostenlose Testversion läuft 30 Tage mit maximal 5 Medikamenten.",
       cta: "Jetzt anmelden",
       guide_title: "📄 Hilfe-Guide als PDF",
       guide_intro: "Laden Sie die Anleitung in Ihrer Sprache herunter:",
@@ -5798,7 +5804,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
     es: {
       subject: "Bienvenido a MediControl — Tus datos de acceso",
       greeting: `Hola ${name}`,
-      intro: "Gracias por registrarte en MediControl. Tu prueba gratuita de 7 días está activa.",
+      intro: "Gracias por registrarte en MediControl. Tu prueba gratuita de 30 días está activa.",
       credentials: "Tus datos de acceso",
       family_id: "Family ID",
       email_label: "Email",
@@ -5810,7 +5816,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       step3: "Cambia tu contraseña",
       step4: "Añade tus medicamentos (manual o escaneando receta)",
       step5: "Activa las notificaciones push para recordatorios",
-      trial_info: "Tu prueba gratuita dura 7 días con hasta 5 medicamentos.",
+      trial_info: "Tu prueba gratuita dura 30 días con máximo 5 medicamentos.",
       cta: "Iniciar sesión",
       guide_title: "📄 Guía de ayuda en PDF",
       guide_intro: "Descarga la guía de usuario en tu idioma:",
@@ -5821,7 +5827,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
     en: {
       subject: "Welcome to MediControl — Your login details",
       greeting: `Hello ${name}`,
-      intro: "Thank you for signing up for MediControl! Your 7-day free trial is active.",
+      intro: "Thank you for signing up for MediControl! Your 30-day free trial is active.",
       credentials: "Your login details",
       family_id: "Family ID",
       email_label: "Email",
@@ -5833,7 +5839,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       step3: "Change your password",
       step4: "Add your medications (manually or by scanning a prescription)",
       step5: "Enable push notifications for reminders",
-      trial_info: "Your free trial lasts 7 days with up to 5 medications.",
+      trial_info: "Your free trial lasts 30 days with max. 5 medications.",
       cta: "Sign in now",
       guide_title: "📄 Help guide in PDF",
       guide_intro: "Download the user guide in your preferred language:",
@@ -7351,6 +7357,19 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
       <p style="font-size:13px; margin-top:4px;"><strong>Opción 2:</strong> SMTP (Render Paid): SMTP_HOST, SMTP_USER, SMTP_PASS</p>
       `}
     </div>
+
+    <div class="card" style="margin-bottom:24px;">
+      <h1>💳 Stripe (pagos)</h1>
+      <p class="muted" style="font-size:13px; margin-top:6px;">
+        ${stripe ? `
+        Estado: <strong style="color:#059669;">Conectado</strong> (${(STRIPE_SECRET_KEY || "").startsWith("sk_test") ? "modo TEST" : "producción"})<br>
+        Webhook: ${STRIPE_WEBHOOK_SECRET ? "✅ Configurado" : "❌ Falta STRIPE_WEBHOOK_SECRET"}<br>
+        Precio mensual: ${STRIPE_PRICE_ID ? "✅ " + STRIPE_PRICE_ID : "❌ Falta STRIPE_PRICE_ID"}<br>
+        Precio anual: ${STRIPE_PRICE_ID_YEARLY ? "✅ " + STRIPE_PRICE_ID_YEARLY : "❌ Falta STRIPE_PRICE_ID_YEARLY"}
+        ` : 'Estado: <strong style="color:#dc2626;">No configurado</strong>. Añade STRIPE_SECRET_KEY en Render → Environment.'}
+      </p>
+      <a class="btn outline" href="https://dashboard.stripe.com" target="_blank" style="margin-top:10px;">Abrir Stripe Dashboard</a>
+    </div>
     ` : ""}
 
     <!-- Links de Soporte y Plataformas -->
@@ -7411,6 +7430,13 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
           <div class="link-meta">
             <h3>Resend</h3>
             <p>Emails · API Keys · Dominios</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://dashboard.stripe.com" target="_blank">
+          <div class="link-icon" style="background:#635bff; color:#fff;">💳</div>
+          <div class="link-meta">
+            <h3>Stripe</h3>
+            <p>${stripe ? (STRIPE_PRICE_ID && STRIPE_PRICE_ID_YEARLY ? "✅ Conectado · Precios OK" : "✅ Conectado · Falta STRIPE_PRICE_ID") : "❌ No configurado"}</p>
           </div>
         </a>
         <a class="link-card" href="https://console.cloud.google.com/apis/credentials" target="_blank">
@@ -8857,7 +8883,7 @@ async function checkTrialExpiry() {
   </div>
   <div style="background:white; padding:30px; border:1px solid #e2e8f0; border-top:none;">
     <p>Hola <strong>${row.first_name || row.name || "usuario"}</strong>,</p>
-    <p>Tu período de prueba gratuito de 7 días ha finalizado. Durante este tiempo, pudiste gestionar hasta 5 medicamentos.</p>
+    <p>Tu período de prueba gratuito de 30 días ha finalizado. Durante este tiempo, pudiste gestionar hasta 5 medicamentos.</p>
     <h2 style="color:#1e40af; font-size:18px;">Activa tu suscripción</h2>
     <p>Para continuar usando todas las funciones sin límites:</p>
     <ul style="color:#475569;">
@@ -8870,7 +8896,7 @@ async function checkTrialExpiry() {
     </ul>
     <div style="text-align:center; margin:24px 0;">
       <a href="${FRONTEND}/billing" style="display:inline-block; background:#2563eb; color:white; padding:14px 32px; border-radius:12px; text-decoration:none; font-weight:bold; font-size:16px;">
-        Activar suscripción – CHF 9.90/mes
+        Activar suscripción – CHF 4.99/mes
       </a>
     </div>
     <hr style="border:none; border-top:1px solid #e2e8f0; margin:24px 0;">
