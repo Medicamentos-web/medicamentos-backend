@@ -2675,7 +2675,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     : msg === "resend_ok"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Credenciales reenviadas por email.</div>'
     : msg === "resend_fail"
-    ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa SMTP.</div>'
+    ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Ajustes → Email (Resend o SMTP). En Render Free usa RESEND_API_KEY.</div>'
     : msg === "resend_oauth"
     ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;">No se puede reenviar credenciales a usuarios con login Google/Facebook.</div>'
     : msg === "cannot_delete_self"
@@ -5934,7 +5934,7 @@ app.get("/admin/inactive-users", requireRoleHtml(["admin"]), async (req, res) =>
       : msg === "resend_ok"
       ? `<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Email de bienvenida reenviado correctamente${count ? ` (${count} enviados)` : ""}${failed ? `. ${failed} fallaron (revisa SMTP).` : ""}</div>`
       : msg === "resend_fail"
-      ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa la configuración SMTP.</div>'
+      ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Ajustes → Email. En Render Free usa RESEND_API_KEY (resend.com).</div>'
       : msg === "no_selection"
       ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Selecciona al menos un usuario.</div>'
       : "";
