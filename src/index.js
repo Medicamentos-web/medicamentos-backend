@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 const webpush = require("web-push");
 const { execFile } = require("child_process");
 const os = require("os");
@@ -218,16 +219,15 @@ function cookieOpts(req) {
 const SMTP_HOST = (process.env.SMTP_HOST || "").trim().toLowerCase();
 const SMTP_USER = (process.env.SMTP_USER || "").trim();
 const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || "").trim();
+const FROM_EMAIL = (process.env.FROM_EMAIL || process.env.SMTP_USER || "MediControl <onboarding@resend.dev>").trim();
 const isGmail = SMTP_HOST.includes("gmail") || SMTP_HOST === "smtp.gmail.com";
 
-const mailTransport =
+const nodemailerTransport =
   SMTP_HOST && SMTP_USER && SMTP_PASS
     ? nodemailer.createTransport(
         isGmail
-          ? {
-              service: "gmail",
-              auth: { user: SMTP_USER, pass: SMTP_PASS },
-            }
+          ? { service: "gmail", auth: { user: SMTP_USER, pass: SMTP_PASS } }
           : {
               host: process.env.SMTP_HOST,
               port: Number(process.env.SMTP_PORT || 587),
@@ -237,6 +237,26 @@ const mailTransport =
             }
       )
     : null;
+
+const resendClient = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+
+const mailTransport = RESEND_API_KEY
+  ? {
+      sendMail: async (opts) => {
+        const from = FROM_EMAIL.includes("<") ? FROM_EMAIL : `MediControl <${FROM_EMAIL}>`;
+        const to = Array.isArray(opts.to) ? opts.to : [opts.to];
+        const { data, error } = await resendClient.emails.send({
+          from,
+          to,
+          subject: opts.subject,
+          html: opts.html,
+        });
+        if (error) throw new Error(error.message || "Resend error");
+        return { messageId: data?.id };
+      },
+      verify: async () => {},
+    }
+  : nodemailerTransport;
 
 let pushKeys = null;
 
@@ -1757,7 +1777,7 @@ app.get("/health", async (_req, res) => {
 
 // Diagnóstico: muestra info del servidor sin consultar DB
 app.get("/diag", (req, res) => {
-  const smtpConfigured = !!mailTransport;
+  const emailConfigured = !!mailTransport;
   res.json({
     ok: true,
     node: process.version,
@@ -1767,7 +1787,9 @@ app.get("/diag", (req, res) => {
       NODE_ENV: process.env.NODE_ENV || "dev",
       HAS_DATABASE_URL: !!process.env.DATABASE_URL,
       HAS_JWT_SECRET: !!process.env.JWT_SECRET,
-      HAS_SMTP: smtpConfigured,
+      HAS_EMAIL: emailConfigured,
+      HAS_SMTP: emailConfigured,
+      EMAIL_PROVIDER: RESEND_API_KEY ? "resend" : nodemailerTransport ? "smtp" : "none",
       HAS_ADMIN_EMAIL: !!process.env.ADMIN_EMAIL,
       PORT: process.env.PORT || "4000",
     },
@@ -7310,14 +7332,22 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
 
     ${isAdmin ? `
     <div class="card" style="margin-bottom:24px;">
-      <h1>📧 Configuración SMTP</h1>
-      <p class="muted" style="font-size:13px; margin-top:6px;">Estado: ${smtpOk ? "✅ Variables configuradas" : "❌ Faltan SMTP_HOST, SMTP_USER o SMTP_PASS"}</p>
+      <h1>📧 Configuración de email</h1>
+      <p class="muted" style="font-size:13px; margin-top:6px;">Proveedor: ${RESEND_API_KEY ? "✅ Resend (API)" : nodemailerTransport ? "SMTP" : "❌ No configurado"}</p>
       ${smtpOk ? `
       <form method="POST" action="/admin/smtp-test" style="margin-top:12px;">
         <button type="submit" class="btn outline">Enviar email de prueba a ${escapeHtml(process.env.ADMIN_EMAIL || "ADMIN_EMAIL")}</button>
       </form>
-      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Gmail: usa contraseña de aplicación (no la contraseña normal). Cuenta Google → Seguridad → Verificación en 2 pasos → Contraseñas de aplicaciones.</p>
-      ` : ""}
+      ${RESEND_API_KEY ? `
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Resend: funciona en Render Free (no bloquea puertos SMTP). FROM_EMAIL: dominio verificado en resend.com</p>
+      ` : `
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">SMTP: Render Free bloquea puertos 587/465. Usa <strong>RESEND_API_KEY</strong> (resend.com) o plan de pago.</p>
+      <p style="font-size:12px; color:var(--muted); margin-top:4px;">Gmail: contraseña de aplicación. Cuenta Google → Seguridad → Verificación en 2 pasos → Contraseñas de aplicaciones.</p>
+      `}
+      ` : `
+      <p style="font-size:13px; margin-top:8px;"><strong>Opción 1 (recomendada para Render Free):</strong> Resend.com → API Key → Variable <code>RESEND_API_KEY</code>. FROM_EMAIL=tu-dominio@verificado.com</p>
+      <p style="font-size:13px; margin-top:4px;"><strong>Opción 2:</strong> SMTP (Render Paid): SMTP_HOST, SMTP_USER, SMTP_PASS</p>
+      `}
     </div>
     ` : ""}
 
