@@ -220,7 +220,7 @@ const SMTP_HOST = (process.env.SMTP_HOST || "").trim().toLowerCase();
 const SMTP_USER = (process.env.SMTP_USER || "").trim();
 const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
 const RESEND_API_KEY = (process.env.RESEND_API_KEY || "").trim();
-const FROM_EMAIL = (process.env.FROM_EMAIL || process.env.SMTP_USER || "MediControl <onboarding@resend.dev>").trim();
+const FROM_EMAIL = (process.env.FROM_EMAIL || "MediControl <onboarding@resend.dev>").trim();
 const isGmail = SMTP_HOST.includes("gmail") || SMTP_HOST === "smtp.gmail.com";
 
 const nodemailerTransport =
@@ -7312,7 +7312,7 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
   const smtpFailHint = smtpCode === "EAUTH"
     ? "Error de autenticación: usa contraseña de aplicación de Gmail (no la contraseña normal)."
     : smtpCode === "ECONNECTION" || smtpCode === "ETIMEDOUT"
-    ? "Error de conexión: revisa SMTP_HOST y SMTP_PORT. Gmail: smtp.gmail.com, puerto 587."
+    ? "Render Free bloquea SMTP. Añade RESEND_API_KEY (resend.com) en Render → Environment."
     : "Revisa SMTP_HOST, SMTP_USER, SMTP_PASS. Gmail: usa contraseña de aplicación.";
   const content = `
     ${settingsMsg === "snapshot_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Snapshot creado correctamente.</p></div>' : ""}
