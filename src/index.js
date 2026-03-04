@@ -2724,6 +2724,8 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Render → Logs para el error exacto. Si usas Resend: verifica que FROM_EMAIL use <code>onboarding@resend.dev</code> o un dominio verificado.</div>'
     : msg === "resend_oauth"
     ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;">No se puede reenviar credenciales a usuarios con login Google/Facebook.</div>'
+    : msg === "merge_ok"
+    ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuarios fusionados correctamente. Los datos están en el usuario destino.</div>'
     : msg === "cannot_delete_self"
     ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">No puedes eliminarte a ti mismo.</div>'
     : msg === "not_found" || msg === "error"
@@ -2775,7 +2777,10 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
       ${msgHtml}
       <div class="users-header">
         <h1>👤 Pacientes y usuarios</h1>
-        <a class="btn primary" href="/admin/user-new">➕ Nuevo usuario</a>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          ${isAdmin ? '<a class="btn outline" href="/admin/merge-users">🔀 Fusionar usuarios</a>' : ""}
+          <a class="btn primary" href="/admin/user-new">➕ Nuevo usuario</a>
+        </div>
       </div>
       <form method="GET" action="/admin/users" class="users-filters">
         <input name="q" type="search" placeholder="Buscar por nombre, email${isAdmin ? " o familia" : ""}..." value="${escapeHtml(q)}" />
@@ -2973,6 +2978,115 @@ app.post("/admin/force-email-password/:id", requireRoleHtml(["admin", "superuser
   } catch (err) {
     console.error("[ADMIN FORCE EMAIL PW]", err.message);
     res.redirect("/admin/users?msg=resend_fail");
+  }
+});
+
+// Fusionar dos usuarios: mueve datos de source a target, elimina source
+app.get("/admin/merge-users", requireRoleHtml(["admin"]), async (req, res) => {
+  const mergeMsg = req.query?.msg || "";
+  const mergeMsgHtml = mergeMsg === "invalid"
+    ? '<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0;">Selecciona dos usuarios distintos.</p></div>'
+    : mergeMsg === "not_found"
+    ? '<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0;">Usuario no encontrado.</p></div>'
+    : mergeMsg === "error"
+    ? '<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0;">Error al fusionar. Revisa los logs.</p></div>'
+    : "";
+
+  const users = await pool.query(
+    `SELECT u.id, u.name, u.email, u.auth_provider, u.family_id, f.name AS family_name,
+            (SELECT COUNT(*) FROM medicines m WHERE m.family_id = u.family_id) AS meds_count
+     FROM users u
+     LEFT JOIN families f ON f.id = u.family_id
+     ORDER BY f.name ASC NULLS LAST, u.name ASC`
+  );
+  const content = `
+    <div class="card" style="max-width:640px;">
+      ${mergeMsgHtml}
+      <h1>🔀 Fusionar usuarios</h1>
+      <p class="muted" style="margin-bottom:16px;">Mueve medicamentos, historial y datos del usuario <strong>origen</strong> al usuario <strong>destino</strong>. El usuario origen será eliminado.</p>
+      <form method="POST" action="/admin/merge-users">
+        <label><strong>Origen</strong> (usuario con datos — se eliminará)</label>
+        <select name="from_user_id" required class="form-control" style="margin-bottom:12px;">
+          <option value="">Seleccionar...</option>
+          ${users.rows.map((u) => `<option value="${u.id}">${escapeHtml(u.name || "-")} — ${escapeHtml(u.email)} (${u.family_name || "-"}) · ${u.meds_count || 0} meds</option>`).join("")}
+        </select>
+        <label><strong>Destino</strong> (usuario que conservará todo)</label>
+        <select name="to_user_id" required class="form-control" style="margin-bottom:16px;">
+          <option value="">Seleccionar...</option>
+          ${users.rows.map((u) => `<option value="${u.id}">${escapeHtml(u.name || "-")} — ${escapeHtml(u.email)} (${u.family_name || "-"})</option>`).join("")}
+        </select>
+        <button type="submit" class="btn primary" onclick="return confirm('¿Fusionar? Los datos del origen se moverán al destino y el usuario origen será eliminado.');">Fusionar</button>
+        <a class="btn outline" href="/admin/users" style="margin-left:8px;">Cancelar</a>
+      </form>
+    </div>`;
+  res.send(renderShell(req, "Fusionar usuarios", "patients", content));
+});
+
+app.post("/admin/merge-users", requireRoleHtml(["admin"]), async (req, res) => {
+  const fromId = Number(req.body?.from_user_id);
+  const toId = Number(req.body?.to_user_id);
+  if (!fromId || !toId || fromId === toId) {
+    return res.redirect("/admin/merge-users?msg=invalid");
+  }
+  try {
+    const [fromUser, toUser] = await Promise.all([
+      pool.query(`SELECT id, name, email, family_id FROM users WHERE id = $1`, [fromId]),
+      pool.query(`SELECT id, name, email, family_id FROM users WHERE id = $1`, [toId]),
+    ]);
+    if (fromUser.rows.length === 0 || toUser.rows.length === 0) {
+      return res.redirect("/admin/merge-users?msg=not_found");
+    }
+    const src = fromUser.rows[0];
+    const tgt = toUser.rows[0];
+    const srcFam = src.family_id;
+    const tgtFam = tgt.family_id;
+
+    await pool.query("BEGIN");
+
+    const medIds = await pool.query(`SELECT id FROM medicines WHERE family_id = $1`, [srcFam]);
+
+    await pool.query(`UPDATE medicines SET family_id = $1, user_id = $2 WHERE family_id = $3`, [tgtFam, toId, srcFam]);
+
+    if (medIds.rows.length > 0) {
+      const ids = medIds.rows.map((r) => r.id).join(",");
+      await pool.query(`UPDATE schedules SET user_id = $1 WHERE medicine_id IN (${ids}) AND user_id = $2`, [toId, fromId]);
+    }
+
+    await pool.query(`UPDATE dose_logs SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE alerts SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE alerts SET user_id = $1, family_id = $2 WHERE family_id = $3`, [toId, tgtFam, srcFam]);
+    await pool.query(`UPDATE medical_records SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE import_batches SET user_id = $1, family_id = $2 WHERE family_id = $3`, [toId, tgtFam, srcFam]);
+    await pool.query(`UPDATE push_subscriptions SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE daily_checkouts SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE medicine_audits SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE dose_change_requests SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE deletion_logs SET user_id = $1, family_id = $2 WHERE user_id = $3`, [toId, tgtFam, fromId]);
+    await pool.query(`UPDATE feedback SET user_id = $1 WHERE user_id = $2`, [toId, fromId]);
+
+    const famDoctors = await pool.query(`SELECT first_name, last_name, email, street, house_number, postal_code, city FROM family_doctors WHERE family_id = $1`, [srcFam]);
+    for (const d of famDoctors.rows) {
+      await pool.query(
+        `INSERT INTO family_doctors (family_id, first_name, last_name, email, street, house_number, postal_code, city)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE NOT EXISTS (SELECT 1 FROM family_doctors WHERE family_id = $1 AND first_name = $2 AND last_name = $3)`,
+        [tgtFam, d.first_name, d.last_name, d.email, d.street, d.house_number, d.postal_code, d.city]
+      );
+    }
+
+    await pool.query(`DELETE FROM users WHERE id = $1`, [fromId]);
+    const remainingInFamily = await pool.query(`SELECT COUNT(*) AS c FROM users WHERE family_id = $1`, [srcFam]);
+    if (Number(remainingInFamily.rows[0]?.c || 0) === 0) {
+      await pool.query(`DELETE FROM families WHERE id = $1`, [srcFam]);
+    }
+
+    await pool.query("COMMIT");
+
+    console.log(`[MERGE] Usuario ${fromId} (${src.email}) fusionado en ${toId} (${tgt.email})`);
+    res.redirect("/admin/users?msg=merge_ok");
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("[ADMIN MERGE]", err.message);
+    res.redirect("/admin/merge-users?msg=error");
   }
 });
 
