@@ -76,7 +76,7 @@ app.post("/api/billing/webhook", express.raw({ type: "application/json" }), asyn
         if (fam.rows[0]?.email && mailTransport) {
           try {
             await mailTransport.sendMail({
-              from: process.env.SMTP_USER, to: fam.rows[0].email,
+              from: SMTP_USER, to: fam.rows[0].email,
               subject: "Suscripción activada - MediControl",
               html: `<h2>Su suscripción ha sido activada</h2><p>Familia: ${fam.rows[0].name || familyId}</p><p>Todas las funciones están ahora disponibles.</p>`,
             });
@@ -215,19 +215,27 @@ function cookieOpts(req) {
   };
 }
 
-const SMTP_PORT_NUM = Number(process.env.SMTP_PORT || 587);
+const SMTP_HOST = (process.env.SMTP_HOST || "").trim().toLowerCase();
+const SMTP_USER = (process.env.SMTP_USER || "").trim();
+const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
+const isGmail = SMTP_HOST.includes("gmail") || SMTP_HOST === "smtp.gmail.com";
+
 const mailTransport =
-  process.env.SMTP_HOST && process.env.SMTP_USER
-    ? nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: SMTP_PORT_NUM,
-        secure: SMTP_PORT_NUM === 465,
-        requireTLS: SMTP_PORT_NUM === 587,
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS,
-        },
-      })
+  SMTP_HOST && SMTP_USER && SMTP_PASS
+    ? nodemailer.createTransport(
+        isGmail
+          ? {
+              service: "gmail",
+              auth: { user: SMTP_USER, pass: SMTP_PASS },
+            }
+          : {
+              host: process.env.SMTP_HOST,
+              port: Number(process.env.SMTP_PORT || 587),
+              secure: Number(process.env.SMTP_PORT || 587) === 465,
+              requireTLS: Number(process.env.SMTP_PORT || 587) === 587,
+              auth: { user: SMTP_USER, pass: SMTP_PASS },
+            }
+      )
     : null;
 
 let pushKeys = null;
@@ -742,7 +750,7 @@ async function sendAdminAlertEmail(subject, html, attachments) {
     return false;
   }
   await mailTransport.sendMail({
-    from: process.env.SMTP_USER,
+    from: SMTP_USER,
     to: ADMIN_EMAIL,
     subject,
     html,
@@ -756,7 +764,7 @@ async function sendUserEmail(email, subject, html) {
     return false;
   }
   await mailTransport.sendMail({
-    from: process.env.SMTP_USER,
+    from: SMTP_USER,
     to: email,
     subject,
     html,
@@ -1749,7 +1757,7 @@ app.get("/health", async (_req, res) => {
 
 // Diagnóstico: muestra info del servidor sin consultar DB
 app.get("/diag", (req, res) => {
-  const smtpConfigured = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+  const smtpConfigured = !!mailTransport;
   res.json({
     ok: true,
     node: process.version,
@@ -2160,7 +2168,7 @@ async function sendWelcomeEmail(email, tempPassword, context = {}) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await mailTransport.sendMail({
-        from: process.env.SMTP_USER,
+        from: SMTP_USER,
         to: email,
         subject: "Tu acceso inicial a MediControl",
         html,
@@ -2175,7 +2183,7 @@ async function sendWelcomeEmail(email, tempPassword, context = {}) {
   if (ADMIN_EMAIL) {
     try {
       await mailTransport.sendMail({
-        from: process.env.SMTP_USER,
+        from: SMTP_USER,
         to: ADMIN_EMAIL,
         subject: `[MediControl] Error: Email de acceso NO enviado a ${email}`,
         html: `<p><strong>No se pudo enviar el email de credenciales</strong> tras ${MAX_RETRIES} intentos.</p>
@@ -5207,7 +5215,7 @@ app.post("/api/register-trial", async (req, res) => {
         try {
           await Promise.race([
             mailTransport.sendMail({
-              from: process.env.SMTP_USER,
+              from: SMTP_USER,
               to: cleanEmail,
               subject: t.subject,
               html: emailHtml,
@@ -5227,7 +5235,7 @@ app.post("/api/register-trial", async (req, res) => {
       if (!welcomeSent && ADMIN_EMAIL) {
         try {
           await mailTransport.sendMail({
-            from: process.env.SMTP_USER,
+            from: SMTP_USER,
             to: ADMIN_EMAIL,
             subject: `[MediControl] Error: Email de bienvenida NO enviado a ${cleanName} (${cleanEmail})`,
             html: `<p><strong>El usuario se registró desde la landing pero no se pudo enviar el email de bienvenida</strong> tras ${MAX_RETRIES} intentos.</p>
@@ -5246,7 +5254,7 @@ app.post("/api/register-trial", async (req, res) => {
       try {
         await Promise.race([
           mailTransport.sendMail({
-            from: process.env.SMTP_USER,
+            from: SMTP_USER,
             to: ADMIN_EMAIL,
             subject: `Nuevo trial: ${cleanName} (${cleanEmail})`,
             html: `<p>Nuevo usuario trial registrado desde landing.</p><p>Family ID: ${familyId}<br>Nombre: ${cleanName}<br>Email: ${cleanEmail}<br>Idioma: ${lang || "de-CH"}</p>`,
@@ -5303,7 +5311,7 @@ app.post("/api/leads", async (req, res) => {
         </div>`;
       try {
         await mailTransport.sendMail({
-          from: process.env.SMTP_USER, to: email.trim(),
+          from: SMTP_USER, to: email.trim(),
           subject: "Willkommen bei MediControl / Bienvenido a MediControl",
           html: welcomeHtml,
         });
@@ -5857,7 +5865,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await Promise.race([
-        mailTransport.sendMail({ from: process.env.SMTP_USER, to: email, subject: t.subject, html: emailHtml }),
+        mailTransport.sendMail({ from: SMTP_USER, to: email, subject: t.subject, html: emailHtml }),
         new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
       ]);
       return true;
@@ -5872,7 +5880,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
   if (ADMIN_EMAIL) {
     try {
       await mailTransport.sendMail({
-        from: process.env.SMTP_USER,
+        from: SMTP_USER,
         to: ADMIN_EMAIL,
         subject: `[MediControl] Error: Reenvío de credenciales fallido para ${email}`,
         html: `<p><strong>No se pudo reenviar el email de bienvenida</strong> tras ${MAX_RETRIES} intentos.</p>
@@ -6558,7 +6566,7 @@ app.post("/api/daily-checkout", requireAuth, async (req, res) => {
 
     if (mailTransport && userEmail) {
       await mailTransport.sendMail({
-        from: process.env.SMTP_USER,
+        from: SMTP_USER,
         to: userEmail,
         subject,
         html,
@@ -6762,7 +6770,7 @@ async function checkMedicineEndDates() {
     if (med.user_email && mailTransport) {
       try {
         await mailTransport.sendMail({
-          from: process.env.SMTP_USER,
+          from: SMTP_USER,
           to: med.user_email,
           subject: `Tratamiento finalizado: ${med.name}`,
           html: `<p>Hola ${med.user_name || ""},</p>
@@ -6777,7 +6785,7 @@ async function checkMedicineEndDates() {
     if (ADMIN_EMAIL && mailTransport) {
       try {
         await mailTransport.sendMail({
-          from: process.env.SMTP_USER,
+          from: SMTP_USER,
           to: ADMIN_EMAIL,
           subject: `Tratamiento finalizado: ${med.name} (${med.user_name || "paciente"})`,
           html: `<p>El medicamento <strong>${med.name} (${med.dosage || ""})</strong> del paciente <strong>${med.user_name || ""}</strong> ha alcanzado su fecha límite (${med.end_date}).</p>`,
@@ -7276,13 +7284,19 @@ app.post("/admin/dose-requests/:id/reject", requireRoleHtml(["admin", "superuser
 app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) => {
   const emergency = req.query?.emergency === "1";
   const settingsMsg = req.query?.msg || "";
+  const smtpCode = req.query?.code || "";
   const isAdmin = req.user?.role === "admin";
-  const smtpOk = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+  const smtpOk = !!mailTransport;
+  const smtpFailHint = smtpCode === "EAUTH"
+    ? "Error de autenticación: usa contraseña de aplicación de Gmail (no la contraseña normal)."
+    : smtpCode === "ECONNECTION" || smtpCode === "ETIMEDOUT"
+    ? "Error de conexión: revisa SMTP_HOST y SMTP_PORT. Gmail: smtp.gmail.com, puerto 587."
+    : "Revisa SMTP_HOST, SMTP_USER, SMTP_PASS. Gmail: usa contraseña de aplicación.";
   const content = `
     ${settingsMsg === "snapshot_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Snapshot creado correctamente.</p></div>' : ""}
     ${settingsMsg === "restored" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Base de datos restaurada correctamente desde backup.</p></div>' : ""}
     ${settingsMsg === "smtp_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Email de prueba enviado correctamente. Revisa la bandeja de ADMIN_EMAIL.</p></div>' : ""}
-    ${settingsMsg === "smtp_fail" ? '<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error SMTP. Revisa los logs del servidor o las variables SMTP_HOST, SMTP_USER, SMTP_PASS. Gmail: usa contraseña de aplicación.</p></div>' : ""}
+    ${settingsMsg === "smtp_fail" ? `<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error SMTP${smtpCode ? " (" + escapeHtml(smtpCode) + ")" : ""}. ${smtpFailHint}</p></div>` : ""}
     <style>
       .link-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
       .link-card { display:flex; align-items:center; gap:12px; padding:14px 16px; border:1px solid var(--border); border-radius:14px; transition:all .15s; background:#fff; }
@@ -7616,16 +7630,18 @@ app.post("/admin/smtp-test", requireRoleHtml(["admin"]), async (req, res) => {
     return res.redirect("/admin/settings?msg=smtp_fail");
   }
   try {
+    await mailTransport.verify();
     await mailTransport.sendMail({
-      from: process.env.SMTP_USER,
+      from: SMTP_USER,
       to: ADMIN_EMAIL,
       subject: "[MediControl] Prueba SMTP correcta",
       html: `<p>Si recibes este email, la configuración SMTP está funcionando correctamente.</p><p>Enviado: ${new Date().toISOString()}</p>`,
     });
     res.redirect("/admin/settings?msg=smtp_ok");
   } catch (err) {
-    console.error("[SMTP TEST] Error:", err.message);
-    res.redirect("/admin/settings?msg=smtp_fail");
+    console.error("[SMTP TEST] Error:", err.message, "Code:", err.code || "-");
+    const code = (err.code || "").toString();
+    res.redirect("/admin/settings?msg=smtp_fail" + (code ? "&code=" + encodeURIComponent(code) : ""));
   }
 });
 
@@ -8759,7 +8775,7 @@ async function checkTrialExpiry() {
       const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
       try {
         await mailTransport.sendMail({
-          from: process.env.SMTP_USER,
+          from: SMTP_USER,
           to: row.email,
           subject: "Tu período de prueba ha finalizado – MediControl",
           html: `
@@ -8823,7 +8839,7 @@ async function checkTrialExpiry() {
       if (ADMIN_EMAIL && mailTransport) {
         try {
           await mailTransport.sendMail({
-            from: process.env.SMTP_USER, to: ADMIN_EMAIL,
+            from: SMTP_USER, to: ADMIN_EMAIL,
             subject: `Trial expirado: Familia ${row.name || row.id}`,
             html: `<p>El trial de la familia <strong>${row.name || row.id}</strong> (${row.email}) ha expirado. Se envió email de oferta.</p>`,
           });
