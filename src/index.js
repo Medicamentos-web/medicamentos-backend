@@ -2716,8 +2716,8 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
   rows.sort((a, b) => (a.name || "").localeCompare(b.name || "", "es", { sensitivity: "base" }));
   const msgHtml = msg === "deleted"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuario eliminado correctamente.</div>'
-    : msg === "resend_ok"
-    ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Credenciales reenviadas por email.</div>'
+    : msg === "resend_ok" || msg === "force_pw_ok"
+    ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Credenciales enviadas por email. El usuario puede entrar con email y contraseña.</div>'
     : msg === "resend_not_configured"
     ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;"><strong>Email no configurado.</strong> Render Free bloquea SMTP. Ve a <a href="/admin/settings">Ajustes</a> y añade <code>RESEND_API_KEY</code> en Render → Environment. Guía: <a href="https://resend.com" target="_blank">resend.com</a></div>'
     : msg === "resend_fail"
@@ -2858,7 +2858,10 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
                   ${(u.auth_provider === "email" || !u.auth_provider) ? `
                   <form method="POST" action="/admin/resend-credentials/${u.id}" style="display:inline;">
                     <button type="submit" class="btn-outline" title="Reenviar credenciales" onclick="return confirm('¿Reenviar credenciales por email?');">📧</button>
-                  </form>` : ""}
+                  </form>` : `
+                  <form method="POST" action="/admin/force-email-password/${u.id}" style="display:inline;">
+                    <button type="submit" class="btn-outline" title="Crear contraseña para login con email (usuario Google/Facebook)" onclick="return confirm('¿Crear contraseña y enviar por email? El usuario podrá entrar con email/contraseña.');">🔑</button>
+                  </form>`}
                   ${u.id !== currentUserId ? `
                   <form method="POST" action="/admin/user-delete/${u.id}" style="display:inline;">
                     <button type="submit" class="btn-danger" title="Eliminar" onclick="return confirm('¿Eliminar este usuario? Se borrarán sus medicamentos y horarios. Esta acción no se puede deshacer.');">🗑</button>
@@ -2937,6 +2940,38 @@ app.post("/admin/resend-credentials/:id", requireRoleHtml(["admin", "superuser"]
     res.redirect("/admin/users?msg=" + (sent ? "resend_ok" : "resend_fail"));
   } catch (err) {
     console.error("[ADMIN RESEND CREDENTIALS]", err.message, err.code || "");
+    res.redirect("/admin/users?msg=resend_fail");
+  }
+});
+
+// Forzar contraseña de email para usuarios Google/Facebook (permite login con email)
+app.post("/admin/force-email-password/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.redirect("/admin/users?msg=resend_fail");
+  if (!mailTransport) {
+    return res.redirect("/admin/users?msg=resend_not_configured");
+  }
+  try {
+    const user = await pool.query(
+      isAdmin
+        ? `SELECT id, name, email, auth_provider, family_id FROM users WHERE id = $1`
+        : `SELECT id, name, email, auth_provider, family_id FROM users WHERE id = $1 AND family_id = $2`,
+      isAdmin ? [id] : [id, familyId]
+    );
+    if (user.rows.length === 0) return res.redirect("/admin/users?msg=resend_fail");
+    const u = user.rows[0];
+    const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
+    const hashed = await bcrypt.hash(tempPassword, 10);
+    await pool.query(
+      `UPDATE users SET password_hash = $1, must_change_password = true, auth_provider = 'email' WHERE id = $2`,
+      [hashed, id]
+    );
+    const sent = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
+    res.redirect("/admin/users?msg=" + (sent ? "force_pw_ok" : "resend_fail"));
+  } catch (err) {
+    console.error("[ADMIN FORCE EMAIL PW]", err.message);
     res.redirect("/admin/users?msg=resend_fail");
   }
 });
