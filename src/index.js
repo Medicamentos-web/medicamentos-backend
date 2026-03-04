@@ -2074,6 +2074,36 @@ if (FACEBOOK_APP_ID && FACEBOOK_APP_SECRET) {
   console.log("[OAUTH] Facebook configurado");
 }
 
+// Diagnóstico: comprobar si un email existe y cómo debe iniciar sesión (sin auth)
+app.get("/api/check-email", async (req, res) => {
+  const email = (req.query.email || "").trim().toLowerCase();
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({ error: "email requerido" });
+  }
+  try {
+    const r = await pool.query(
+      `SELECT id, family_id, auth_provider FROM users WHERE email = $1 LIMIT 1`,
+      [email]
+    );
+    if (r.rows.length === 0) {
+      return res.json({ exists: false, hint: "No hay cuenta con este email. Regístrate desde la landing o usa Google." });
+    }
+    const u = r.rows[0];
+    const provider = u.auth_provider || "email";
+    return res.json({
+      exists: true,
+      family_id: u.family_id,
+      auth_provider: provider,
+      hint: provider === "email"
+        ? "Usa email + contraseña. Si no recuerdas: Olvidé mi contraseña. Si no tienes Family ID, déjalo vacío."
+        : `Esta cuenta usa ${provider === "google" ? "Google" : "Facebook"}. Usa el botón correspondiente en lugar de email/contraseña.`,
+    });
+  } catch (err) {
+    console.error("[CHECK-EMAIL]", err.message);
+    res.status(500).json({ error: "Error al consultar" });
+  }
+});
+
 app.post("/auth/forgot", async (req, res) => {
   const { family_id, email } = req.body || {};
   if (!email) {
