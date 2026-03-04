@@ -2012,7 +2012,8 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
       if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
       const token = signToken(user);
       res.cookie(TOKEN_NAME, token, cookieOpts(req));
-      res.redirect(FRONTEND_URL + "?oauth=ok");
+      const sep = FRONTEND_URL.includes("?") ? "&" : "?";
+      res.redirect(FRONTEND_URL + sep + "oauth=ok&token=" + encodeURIComponent(token));
     }
   );
   console.log("[OAUTH] Google configurado");
@@ -2046,7 +2047,8 @@ if (FACEBOOK_APP_ID && FACEBOOK_APP_SECRET) {
       if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
       const token = signToken(user);
       res.cookie(TOKEN_NAME, token, cookieOpts(req));
-      res.redirect(FRONTEND_URL + "?oauth=ok");
+      const sep = FRONTEND_URL.includes("?") ? "&" : "?";
+      res.redirect(FRONTEND_URL + sep + "oauth=ok&token=" + encodeURIComponent(token));
     }
   );
   console.log("[OAUTH] Facebook configurado");
