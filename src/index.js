@@ -240,6 +240,8 @@ const nodemailerTransport =
 
 const resendClient = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
+const RESEND_FALLBACK_FROM = "MediControl <onboarding@resend.dev>";
+
 const mailTransport = RESEND_API_KEY
   ? {
       sendMail: async (opts) => {
@@ -251,8 +253,20 @@ const mailTransport = RESEND_API_KEY
           subject: opts.subject,
           html: opts.html,
         });
-        if (error) throw new Error(error.message || "Resend error");
-        return { messageId: data?.id };
+        if (!error) return { messageId: data?.id };
+        const msg = (error.message || "").toLowerCase();
+        if ((msg.includes("domain") || msg.includes("verif") || msg.includes("from")) && from !== RESEND_FALLBACK_FROM) {
+          console.warn("[RESEND] FROM_EMAIL no verificado, fallback a onboarding@resend.dev:", error.message);
+          const retry = await resendClient.emails.send({
+            from: RESEND_FALLBACK_FROM,
+            to,
+            subject: opts.subject,
+            html: opts.html,
+          });
+          if (!retry.error) return { messageId: retry.data?.id };
+          throw new Error(retry.error.message || "Resend error");
+        }
+        throw new Error(error.message || "Resend error");
       },
       verify: async () => {},
     }
