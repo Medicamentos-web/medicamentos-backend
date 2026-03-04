@@ -2674,8 +2674,10 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuario eliminado correctamente.</div>'
     : msg === "resend_ok"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Credenciales reenviadas por email.</div>'
+    : msg === "resend_not_configured"
+    ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;"><strong>Email no configurado.</strong> Render Free bloquea SMTP. Ve a <a href="/admin/settings">Ajustes</a> y añade <code>RESEND_API_KEY</code> en Render → Environment. Guía: <a href="https://resend.com" target="_blank">resend.com</a></div>'
     : msg === "resend_fail"
-    ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Ajustes → Email (Resend o SMTP). En Render Free usa RESEND_API_KEY.</div>'
+    ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Render → Logs para el error exacto. Si usas Resend: verifica que FROM_EMAIL use <code>onboarding@resend.dev</code> o un dominio verificado.</div>'
     : msg === "resend_oauth"
     ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;">No se puede reenviar credenciales a usuarios con login Google/Facebook.</div>'
     : msg === "cannot_delete_self"
@@ -2865,6 +2867,10 @@ app.post("/admin/resend-credentials/:id", requireRoleHtml(["admin", "superuser"]
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
     return res.redirect("/admin/users?msg=resend_fail");
+  }
+  if (!mailTransport) {
+    console.error("[ADMIN RESEND] Email no configurado. Añade RESEND_API_KEY en Render.");
+    return res.redirect("/admin/users?msg=resend_not_configured");
   }
   try {
     const user = await pool.query(
@@ -7326,6 +7332,7 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
     ${settingsMsg === "snapshot_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Snapshot creado correctamente.</p></div>' : ""}
     ${settingsMsg === "restored" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Base de datos restaurada correctamente desde backup.</p></div>' : ""}
     ${settingsMsg === "smtp_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Email de prueba enviado correctamente. Revisa la bandeja de ADMIN_EMAIL.</p></div>' : ""}
+    ${settingsMsg === "email_not_configured" ? '<div class="card" style="background:#fef3c7; border-color:#f59e0b; margin-bottom:12px;"><p style="margin:0; font-size:14px;"><strong>Email no configurado.</strong> Render Free bloquea SMTP. Añade <code>RESEND_API_KEY</code> en Render → Environment. <a href="https://resend.com" target="_blank">resend.com</a> → API Keys → Crear → Copiar key (re_xxx)</p></div>' : ""}
     ${settingsMsg === "smtp_fail" ? `<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error SMTP${smtpCode ? " (" + escapeHtml(smtpCode) + ")" : ""}. ${smtpFailHint}</p></div>` : ""}
     <style>
       .link-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
@@ -7723,8 +7730,11 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
 });
 
 app.post("/admin/smtp-test", requireRoleHtml(["admin"]), async (req, res) => {
-  if (!mailTransport || !ADMIN_EMAIL) {
-    return res.redirect("/admin/settings?msg=smtp_fail");
+  if (!mailTransport) {
+    return res.redirect("/admin/settings?msg=email_not_configured");
+  }
+  if (!ADMIN_EMAIL) {
+    return res.redirect("/admin/settings?msg=smtp_fail&code=NO_ADMIN_EMAIL");
   }
   try {
     await mailTransport.verify();
