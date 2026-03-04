@@ -7358,27 +7358,66 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
       <h1>🔗 Soporte y plataformas</h1>
       <p class="muted" style="font-size:13px; margin-top:6px;">Acceso rápido a todos los servicios del proyecto MediControl.</p>
 
-      <div class="section-title">🚀 Despliegue y hosting</div>
+      <div class="section-title">🌐 URLs principales</div>
       <div class="link-grid">
-        <a class="link-card" href="https://vercel.com/medicamentos-webs-projects" target="_blank">
-          <div class="link-icon" style="background:#000; color:#fff;">▲</div>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app" target="_blank">
+          <div class="link-icon" style="background:#10b981; color:#fff;">📱</div>
           <div class="link-meta">
-            <h3>Vercel Dashboard</h3>
-            <p>Frontend · Deployments · Logs · Analytics</p>
+            <h3>App (Frontend)</h3>
+            <p>medicamentos-frontend.vercel.app</p>
           </div>
         </a>
-        <a class="link-card" href="https://medicamentos-frontend.vercel.app" target="_blank">
-          <div class="link-icon" style="background:#10b981; color:#fff;">🌐</div>
+        <a class="link-card" href="https://medicamentos-backend.onrender.com" target="_blank">
+          <div class="link-icon" style="background:#2563eb; color:#fff;">⚙</div>
           <div class="link-meta">
-            <h3>App en producción</h3>
-            <p>medicamentos-frontend.vercel.app</p>
+            <h3>Backend API</h3>
+            <p>medicamentos-backend.onrender.com</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://medicamentos-backend.onrender.com/dashboard" target="_blank">
+          <div class="link-icon" style="background:#34d399; color:#fff;">🏠</div>
+          <div class="link-meta">
+            <h3>Panel Admin</h3>
+            <p>Dashboard · Login admin</p>
           </div>
         </a>
         <a class="link-card" href="https://medicamentos-frontend.vercel.app/landing" target="_blank">
           <div class="link-icon" style="background:#6366f1; color:#fff;">📄</div>
           <div class="link-meta">
             <h3>Landing Page</h3>
-            <p>Página de presentación multiidioma</p>
+            <p>Presentación · Trial · Encuesta</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title">🚀 Despliegue y hosting</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://vercel.com/dashboard" target="_blank">
+          <div class="link-icon" style="background:#000; color:#fff;">▲</div>
+          <div class="link-meta">
+            <h3>Vercel Dashboard</h3>
+            <p>Frontend · Deployments · Logs · Variables</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://dashboard.render.com" target="_blank">
+          <div class="link-icon" style="background:#46e3b7; color:#0f172a;">R</div>
+          <div class="link-meta">
+            <h3>Render Dashboard</h3>
+            <p>Backend · Logs · Environment · Deploys</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://resend.com/dashboard" target="_blank">
+          <div class="link-icon" style="background:#6366f1; color:#fff;">📧</div>
+          <div class="link-meta">
+            <h3>Resend</h3>
+            <p>Emails · API Keys · Dominios</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://console.cloud.google.com/apis/credentials" target="_blank">
+          <div class="link-icon" style="background:#4285f4; color:#fff;">G</div>
+          <div class="link-meta">
+            <h3>Google Cloud</h3>
+            <p>OAuth · Credenciales · Proyecto MediControl</p>
           </div>
         </a>
       </div>
