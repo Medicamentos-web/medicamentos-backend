@@ -6,7 +6,7 @@
 
 ## Paso 1: Crear cuenta en Brevo
 
-1. Ve a [brevo.com](https://www.brevo.com)
+1. Ve a [brevo.com]()https://www.brevo.com
 2. Clic en **Sign up free**
 3. Regístrate con tu email (ej: alertas.medicamentos@gmail.com)
 4. Confirma el email de verificación
@@ -85,11 +85,19 @@ El backend usa el primer disponible en este orden:
 
 ## Solución de problemas
 
+**"Key not found"**
+- La API key no es válida. Genera una **nueva** en Brevo:
+  1. [app.brevo.com](https://app.brevo.com) → **Settings** → **SMTP & API** → **API Keys**
+  2. **Generate a new API key** → Nombre: MediControl → **Generate**
+  3. Copia la clave **inmediatamente** (solo se muestra una vez)
+  4. En Render → Environment → `BREVO_API_KEY` → pega la nueva clave
+  5. Guarda (Render redesplegará)
+
 **"Sender not verified"**
 - Verifica el remitente en Brevo → Senders con el código que te envían por email.
 
 **"Invalid API key"**
-- Comprueba que copiaste la clave completa (xkeysib-...).
+- Comprueba que copiaste la clave completa.
 - No debe haber espacios al inicio o final.
 
 **Sigue usando Resend**

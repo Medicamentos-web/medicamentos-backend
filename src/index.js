@@ -270,9 +270,13 @@ const brevoTransport = BREVO_API_KEY
             htmlContent: opts.html,
           }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (res.ok && data.messageId) return { messageId: data.messageId };
-        throw new Error(data.message || data.code || `Brevo error ${res.status}`);
+        const errMsg = data.message || data.code || (typeof data === "string" ? data : null) || `Brevo error ${res.status}`;
+        if (String(errMsg).toLowerCase().includes("key") && String(errMsg).toLowerCase().includes("not found")) {
+          console.warn("[BREVO] API key inválida. Genera una nueva en app.brevo.com → SMTP & API → API Keys.");
+        }
+        throw new Error(errMsg);
       },
       verify: async () => {},
     }
@@ -7614,7 +7618,9 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
   const isAdmin = req.user?.role === "admin";
   const smtpOk = !!mailTransport;
   const smtpFailHint = smtpErr
-    ? escapeHtml(smtpErr)
+    ? escapeHtml(smtpErr) + (smtpErr.toLowerCase().includes("key") && smtpErr.toLowerCase().includes("not found")
+      ? ' <strong>Solución:</strong> Genera una nueva API key en <a href="https://app.brevo.com/settings/keys/api" target="_blank">Brevo → SMTP & API → API Keys</a> y actualiza BREVO_API_KEY en Render.'
+      : "")
     : smtpCode === "EAUTH"
     ? "Error de autenticación: usa contraseña de aplicación de Gmail (no la contraseña normal)."
     : smtpCode === "ECONNECTION" || smtpCode === "ETIMEDOUT"
