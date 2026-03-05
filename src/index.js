@@ -7610,9 +7610,12 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
   const emergency = req.query?.emergency === "1";
   const settingsMsg = req.query?.msg || "";
   const smtpCode = req.query?.code || "";
+  const smtpErr = (req.query?.err || "").trim();
   const isAdmin = req.user?.role === "admin";
   const smtpOk = !!mailTransport;
-  const smtpFailHint = smtpCode === "EAUTH"
+  const smtpFailHint = smtpErr
+    ? escapeHtml(smtpErr)
+    : smtpCode === "EAUTH"
     ? "Error de autenticación: usa contraseña de aplicación de Gmail (no la contraseña normal)."
     : smtpCode === "ECONNECTION" || smtpCode === "ETIMEDOUT"
     ? "Render Free bloquea SMTP. Añade BREVO_API_KEY (brevo.com, sin dominio) o RESEND_API_KEY (resend.com, con dominio) en Render → Environment."
@@ -7622,7 +7625,7 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
     ${settingsMsg === "restored" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Base de datos restaurada correctamente desde backup.</p></div>' : ""}
     ${settingsMsg === "smtp_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Email de prueba enviado correctamente. Revisa la bandeja de ADMIN_EMAIL.</p></div>' : ""}
     ${settingsMsg === "email_not_configured" ? '<div class="card" style="background:#fef3c7; border-color:#f59e0b; margin-bottom:12px;"><p style="margin:0; font-size:14px;"><strong>Email no configurado.</strong> Render Free bloquea SMTP. Opción 1 (sin dominio): <a href="https://www.brevo.com" target="_blank">Brevo.com</a> → API Key → <code>BREVO_API_KEY</code>. Opción 2: <a href="https://resend.com" target="_blank">Resend.com</a> → <code>RESEND_API_KEY</code> (requiere dominio).</p></div>' : ""}
-    ${settingsMsg === "smtp_fail" ? `<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error SMTP${smtpCode ? " (" + escapeHtml(smtpCode) + ")" : ""}. ${smtpFailHint}</p></div>` : ""}
+    ${settingsMsg === "smtp_fail" ? `<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error al enviar email${smtpCode ? " (" + escapeHtml(smtpCode) + ")" : ""}. ${smtpFailHint}</p></div>` : ""}
     <style>
       .link-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
       .link-card { display:flex; align-items:center; gap:12px; padding:14px 16px; border:1px solid var(--border); border-radius:14px; transition:all .15s; background:#fff; }
@@ -8031,17 +8034,19 @@ app.post("/admin/smtp-test", requireRoleHtml(["admin"]), async (req, res) => {
   }
   try {
     await mailTransport.verify();
+    const fromAddr = (RESEND_API_KEY || BREVO_API_KEY) ? FROM_EMAIL : SMTP_USER;
     await mailTransport.sendMail({
-      from: SMTP_USER,
+      from: fromAddr,
       to: ADMIN_EMAIL,
-      subject: "[MediControl] Prueba SMTP correcta",
-      html: `<p>Si recibes este email, la configuración SMTP está funcionando correctamente.</p><p>Enviado: ${new Date().toISOString()}</p>`,
+      subject: "[MediControl] Prueba de email correcta",
+      html: `<p>Si recibes este email, la configuración está funcionando correctamente.</p><p>Enviado: ${new Date().toISOString()}</p>`,
     });
     res.redirect("/admin/settings?msg=smtp_ok");
   } catch (err) {
-    console.error("[SMTP TEST] Error:", err.message, "Code:", err.code || "-");
+    console.error("[EMAIL TEST] Error:", err.message, "Code:", err.code || "-");
     const code = (err.code || "").toString();
-    res.redirect("/admin/settings?msg=smtp_fail" + (code ? "&code=" + encodeURIComponent(code) : ""));
+    const errMsg = (err.message || "").slice(0, 80);
+    res.redirect("/admin/settings?msg=smtp_fail" + (code ? "&code=" + encodeURIComponent(code) : "") + (errMsg ? "&err=" + encodeURIComponent(errMsg) : ""));
   }
 });
 
