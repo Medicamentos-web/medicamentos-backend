@@ -2798,7 +2798,8 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
       .users-table .col-meds { width:6%; }
       .users-table .col-hor { width:6%; }
       .users-table .col-login { width:12%; }
-      .users-table .col-actions { width:20%; }
+      .users-table .col-email-status { width:4%; text-align:center; }
+      .users-table .col-actions { width:18%; }
       .user-avatar-sm { width:28px; height:28px; border-radius:6px; background:linear-gradient(135deg,#34d399,#06b6d4); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:12px; flex-shrink:0; }
       .user-name-cell { font-weight:600; }
       .user-email-cell { color:var(--muted); font-size:12px; }
@@ -2862,6 +2863,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
             <col class="col-meds" />
             <col class="col-hor" />
             <col class="col-login" />
+            <col class="col-email-status" />
             <col class="col-actions" />
           </colgroup>
           <thead>
@@ -2874,6 +2876,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
               <th>Med.</th>
               <th>Hor.</th>
               <th>Login</th>
+              <th title="¿Usuario inició sesión? (indica que recibió credenciales)">📧</th>
               <th>Acciones</th>
             </tr>
           </thead>
@@ -2902,20 +2905,21 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
               <td>${medsCount}</td>
               <td>${schedCount}</td>
               <td>${lastLogin}</td>
+              <td title="${u.last_login ? "Sí — usuario inició sesión (recibió credenciales)" : "No — sin login aún"}">${u.last_login ? '<span style="color:#16a34a; font-weight:bold;">✓</span>' : '<span style="color:#94a3b8;">✗</span>'}</td>
               <td class="user-actions-cell">
                 <div class="act-wrap">
                   <a class="btn-edit" href="/admin/user-edit/${u.id}" title="Editar">✏️</a>
                   <a class="btn-outline" href="/admin/meds-list?user_id=${u.id}" title="Medicamentos">💊</a>
                   ${(u.auth_provider === "email" || !u.auth_provider) ? `
                   <form method="POST" action="/admin/resend-credentials/${u.id}" style="display:inline;">
-                    <button type="submit" class="btn-outline" title="Reenviar credenciales por email" onclick="return confirm('¿Reenviar credenciales por email?');">📧</button>
+                    <button type="submit" class="btn-outline" title="Reenviar credenciales por email">📧</button>
                   </form>` : ""}
                   <form method="POST" action="/admin/force-email-password/${u.id}" style="display:inline;">
-                    <button type="submit" class="btn-outline" title="Crear/restablecer contraseña. Si el email falla, usa el enlace para copiar y enviar por WhatsApp." onclick="return confirm('¿Crear contraseña y enviar por email? Si falla, podrás copiarla para enviar por WhatsApp.');">🔑</button>
+                    <button type="submit" class="btn-outline" title="Crear/restablecer contraseña">🔑</button>
                   </form>
                   ${u.id !== currentUserId ? `
                   <form method="POST" action="/admin/user-delete/${u.id}" style="display:inline;">
-                    <button type="submit" class="btn-danger" title="Eliminar" onclick="return confirm('¿Eliminar este usuario? Se borrarán sus medicamentos y horarios. Esta acción no se puede deshacer.');">🗑</button>
+                    <button type="submit" class="btn-danger" title="Eliminar">🗑</button>
                   </form>` : ""}
                 </div>
               </td>
@@ -2924,7 +2928,8 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
               .join("")}
           </tbody>
         </table>
-      </div>`
+      </div>
+      <p class="muted" style="font-size:11px; margin-top:8px;">📧 <strong>✓</strong> = inició sesión (recibió credenciales) · <strong>✗</strong> = sin login · ✏️ Editar · 💊 Medicamentos · 📧 Reenviar email · 🔑 Crear contraseña · 🗑 Eliminar</p>`
       }
     </div>
   `;
