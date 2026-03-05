@@ -220,8 +220,15 @@ const SMTP_HOST = (process.env.SMTP_HOST || "").trim().toLowerCase();
 const SMTP_USER = (process.env.SMTP_USER || "").trim();
 const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
 const RESEND_API_KEY = (process.env.RESEND_API_KEY || "").trim();
+const BREVO_API_KEY = (process.env.BREVO_API_KEY || "").trim();
 const FROM_EMAIL = (process.env.FROM_EMAIL || "MediControl <onboarding@resend.dev>").trim();
 const isGmail = SMTP_HOST.includes("gmail") || SMTP_HOST === "smtp.gmail.com";
+
+function parseFromEmail(str) {
+  const m = str.match(/^([^<]*)<([^>]+)>$/);
+  if (m) return { name: (m[1] || "MediControl").trim(), email: m[2].trim() };
+  return { name: "MediControl", email: str.trim() };
+}
 
 const nodemailerTransport =
   SMTP_HOST && SMTP_USER && SMTP_PASS
@@ -241,6 +248,35 @@ const nodemailerTransport =
 const resendClient = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 const RESEND_FALLBACK_FROM = "MediControl <onboarding@resend.dev>";
+
+const brevoTransport = BREVO_API_KEY
+  ? {
+      sendMail: async (opts) => {
+        const fromStr = (opts.from && String(opts.from).trim()) ? opts.from : FROM_EMAIL;
+        const sender = parseFromEmail(fromStr.includes("@") ? fromStr : FROM_EMAIL);
+        const toList = Array.isArray(opts.to) ? opts.to : [opts.to];
+        const to = toList.map((t) => (typeof t === "string" ? { email: t } : { email: t.address || t.email, name: t.name }));
+        const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+          method: "POST",
+          headers: {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "api-key": BREVO_API_KEY,
+          },
+          body: JSON.stringify({
+            sender: { name: sender.name, email: sender.email },
+            to,
+            subject: opts.subject,
+            htmlContent: opts.html,
+          }),
+        });
+        const data = await res.json();
+        if (res.ok && data.messageId) return { messageId: data.messageId };
+        throw new Error(data.message || data.code || `Brevo error ${res.status}`);
+      },
+      verify: async () => {},
+    }
+  : null;
 
 const mailTransport = RESEND_API_KEY
   ? {
@@ -270,7 +306,7 @@ const mailTransport = RESEND_API_KEY
       },
       verify: async () => {},
     }
-  : nodemailerTransport;
+  : brevoTransport || nodemailerTransport;
 
 let pushKeys = null;
 
@@ -1286,7 +1322,8 @@ function authMiddleware(req, _res, next) {
   const bearer = req.headers.authorization?.startsWith("Bearer ")
     ? req.headers.authorization.slice(7)
     : null;
-  const token = req.cookies[TOKEN_NAME] || bearer;
+  // Preferir Bearer sobre cookie: OAuth pasa token en URL, la cookie puede ser de otro usuario
+  const token = bearer || req.cookies[TOKEN_NAME];
   if (!token) {
     req.user = null;
     return next();
@@ -1803,7 +1840,7 @@ app.get("/diag", (req, res) => {
       HAS_JWT_SECRET: !!process.env.JWT_SECRET,
       HAS_EMAIL: emailConfigured,
       HAS_SMTP: emailConfigured,
-      EMAIL_PROVIDER: RESEND_API_KEY ? "resend" : nodemailerTransport ? "smtp" : "none",
+      EMAIL_PROVIDER: RESEND_API_KEY ? "resend" : BREVO_API_KEY ? "brevo" : nodemailerTransport ? "smtp" : "none",
       HAS_ADMIN_EMAIL: !!process.env.ADMIN_EMAIL,
       PORT: process.env.PORT || "4000",
     },
@@ -2023,7 +2060,10 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
       }
     )
   );
-  app.get("/auth/google", passport.authenticate("google", { scope: ["profile", "email"] }));
+  app.get("/auth/google", passport.authenticate("google", {
+    scope: ["profile", "email"],
+    prompt: "select_account", // Siempre mostrar selector de cuentas (útil con 2+ usuarios en el mismo móvil)
+  }));
   app.get(
     "/auth/google/callback",
     passport.authenticate("google", { session: false }),
@@ -2675,6 +2715,8 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
   const roleFilter = req.query?.role || "";
   const familyFilter = req.query?.family_id || "";
   const msg = req.query?.msg || "";
+  const errDetail = (req.query?.err || "").trim();
+  const failUserId = /^\d+$/.test(req.query?.user_id || "") ? req.query.user_id : "";
   const users = await pool.query(
     isAdmin
       ? `SELECT u.id, u.name, u.email, u.role, u.auth_provider, u.last_login, u.created_at, u.family_id,
@@ -2719,11 +2761,11 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     : msg === "resend_ok" || msg === "force_pw_ok"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Credenciales enviadas por email. El usuario puede entrar con email y contraseña.</div>'
     : msg === "resend_not_configured"
-    ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;"><strong>Email no configurado.</strong> Render Free bloquea SMTP. Ve a <a href="/admin/settings">Ajustes</a> y añade <code>RESEND_API_KEY</code> en Render → Environment. Guía: <a href="https://resend.com" target="_blank">resend.com</a></div>'
+    ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;"><strong>Email no configurado.</strong> Ve a <a href="/admin/settings">Ajustes</a> y añade <code>BREVO_API_KEY</code> (brevo.com, gratis sin dominio) o <code>RESEND_API_KEY</code> (resend.com, requiere dominio verificado).</div>'
     : msg === "resend_fail"
-    ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Render → Logs para el error exacto. Si usas Resend: verifica que FROM_EMAIL use <code>onboarding@resend.dev</code> o un dominio verificado.</div>'
+    ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">' + (errDetail ? `<strong>Error Resend:</strong> ${escapeHtml(errDetail)}<br><br>` : '') + '<strong>Solución:</strong> Con <code>onboarding@resend.dev</code> solo puedes enviar a tu propio email. Verifica un dominio en <a href="https://resend.com/domains" target="_blank" rel="noopener">resend.com/domains</a> y configura <code>FROM_EMAIL</code> con ese dominio (ej: <code>noreply@tudominio.com</code>).' + (failUserId ? `<br><br><a href="/admin/show-password/${escapeHtml(failUserId)}" class="btn outline" style="margin-top:8px; display:inline-block;">🔑 Obtener contraseña para copiar y enviar por WhatsApp</a>` : '') + '</div>'
     : msg === "resend_oauth"
-    ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;">No se puede reenviar credenciales a usuarios con login Google/Facebook.</div>'
+    ? '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:12px; padding:12px; margin-bottom:16px; color:#92400e;">No se puede reenviar credenciales a usuarios con login Google/Facebook. <strong>Usa el botón 🔑</strong> para crear contraseña y enviar por email.</div>'
     : msg === "merge_ok"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuarios fusionados correctamente. Los datos están en el usuario destino.</div>'
     : msg === "cannot_delete_self"
@@ -2862,11 +2904,11 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
                   <a class="btn-outline" href="/admin/meds-list?user_id=${u.id}" title="Medicamentos">💊</a>
                   ${(u.auth_provider === "email" || !u.auth_provider) ? `
                   <form method="POST" action="/admin/resend-credentials/${u.id}" style="display:inline;">
-                    <button type="submit" class="btn-outline" title="Reenviar credenciales" onclick="return confirm('¿Reenviar credenciales por email?');">📧</button>
-                  </form>` : `
+                    <button type="submit" class="btn-outline" title="Reenviar credenciales por email" onclick="return confirm('¿Reenviar credenciales por email?');">📧</button>
+                  </form>` : ""}
                   <form method="POST" action="/admin/force-email-password/${u.id}" style="display:inline;">
-                    <button type="submit" class="btn-outline" title="Crear contraseña para login con email (usuario Google/Facebook)" onclick="return confirm('¿Crear contraseña y enviar por email? El usuario podrá entrar con email/contraseña.');">🔑</button>
-                  </form>`}
+                    <button type="submit" class="btn-outline" title="Crear/restablecer contraseña. Si el email falla, usa el enlace para copiar y enviar por WhatsApp." onclick="return confirm('¿Crear contraseña y enviar por email? Si falla, podrás copiarla para enviar por WhatsApp.');">🔑</button>
+                  </form>
                   ${u.id !== currentUserId ? `
                   <form method="POST" action="/admin/user-delete/${u.id}" style="display:inline;">
                     <button type="submit" class="btn-danger" title="Eliminar" onclick="return confirm('¿Eliminar este usuario? Se borrarán sus medicamentos y horarios. Esta acción no se puede deshacer.');">🗑</button>
@@ -2941,11 +2983,54 @@ app.post("/admin/resend-credentials/:id", requireRoleHtml(["admin", "superuser"]
     const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
     const hashed = await bcrypt.hash(tempPassword, 10);
     await pool.query(`UPDATE users SET password_hash = $1, must_change_password = true WHERE id = $2`, [hashed, id]);
-    const sent = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
-    res.redirect("/admin/users?msg=" + (sent ? "resend_ok" : "resend_fail"));
+    const result = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
+    const sent = result?.ok === true;
+    const errParam = !sent && result?.error ? "&err=" + encodeURIComponent(String(result.error).slice(0, 250).replace(/[\r\n<>]/g, "")) : "";
+    res.redirect("/admin/users?msg=" + (sent ? "resend_ok" : "resend_fail") + errParam + (!sent ? "&user_id=" + id : ""));
   } catch (err) {
+    const errMsg = (err?.message || String(err)).slice(0, 250).replace(/[\r\n<>]/g, "");
     console.error("[ADMIN RESEND CREDENTIALS]", err.message, err.code || "");
-    res.redirect("/admin/users?msg=resend_fail");
+    res.redirect("/admin/users?msg=resend_fail&err=" + encodeURIComponent(errMsg) + "&user_id=" + id);
+  }
+});
+
+// Mostrar contraseña temporal para copiar (cuando el email no se pudo enviar)
+app.get("/admin/show-password/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const id = Number(req.params.id);
+  const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  if (!Number.isFinite(id)) return res.redirect("/admin/users?msg=error");
+  try {
+    const user = await pool.query(
+      isAdmin
+        ? `SELECT id, name, email, family_id FROM users WHERE id = $1`
+        : `SELECT id, name, email, family_id FROM users WHERE id = $1 AND family_id = $2`,
+      isAdmin ? [id] : [id, familyId]
+    );
+    if (user.rows.length === 0) return res.redirect("/admin/users?msg=not_found");
+    const u = user.rows[0];
+    const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
+    const hashed = await bcrypt.hash(tempPassword, 10);
+    await pool.query(
+      `UPDATE users SET password_hash = $1, must_change_password = true, auth_provider = 'email' WHERE id = $2`,
+      [hashed, id]
+    );
+    const content = `
+      <div class="card" style="max-width:480px;">
+        <h1>🔑 Contraseña temporal</h1>
+        <p class="muted" style="margin-bottom:16px;">Copia esta contraseña y envíala al usuario por WhatsApp u otro medio (el email no se pudo enviar).</p>
+        <div style="background:#f0fdf4; border:2px solid #22c55e; border-radius:12px; padding:20px; margin:16px 0;">
+          <p style="margin:0 0 8px; font-size:12px; color:#64748b;">Usuario: <strong>${escapeHtml(u.name || "-")}</strong> · ${escapeHtml(u.email)}</p>
+          <p style="margin:0 0 8px; font-size:12px; color:#64748b;">Family ID: <strong>${u.family_id}</strong></p>
+          <p id="pw-temp" style="margin:12px 0 0; font-size:20px; font-weight:bold; font-family:monospace; color:#166534; letter-spacing:2px;">${escapeHtml(tempPassword)}</p>
+        </div>
+        <button onclick="var pw=document.getElementById('pw-temp').textContent; navigator.clipboard.writeText(pw); this.textContent='✓ Copiado'; setTimeout(function(){this.textContent='Copiar'}.bind(this), 2000)" class="btn primary" style="margin-right:8px;">Copiar</button>
+        <a href="/admin/users" class="btn outline">Volver a Usuarios</a>
+      </div>`;
+    res.send(renderShell(req, "Contraseña temporal", "users", content));
+  } catch (err) {
+    console.error("[ADMIN SHOW PASSWORD]", err.message);
+    res.redirect("/admin/users?msg=error");
   }
 });
 
@@ -2973,11 +3058,14 @@ app.post("/admin/force-email-password/:id", requireRoleHtml(["admin", "superuser
       `UPDATE users SET password_hash = $1, must_change_password = true, auth_provider = 'email' WHERE id = $2`,
       [hashed, id]
     );
-    const sent = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
-    res.redirect("/admin/users?msg=" + (sent ? "force_pw_ok" : "resend_fail"));
+    const result = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
+    const sent = result?.ok === true;
+    const errParam = !sent && result?.error ? "&err=" + encodeURIComponent(String(result.error).slice(0, 250).replace(/[\r\n<>]/g, "")) : "";
+    res.redirect("/admin/users?msg=" + (sent ? "force_pw_ok" : "resend_fail") + errParam + (!sent ? "&user_id=" + id : ""));
   } catch (err) {
+    const errMsg = (err?.message || String(err)).slice(0, 250).replace(/[\r\n<>]/g, "");
     console.error("[ADMIN FORCE EMAIL PW]", err.message);
-    res.redirect("/admin/users?msg=resend_fail");
+    res.redirect("/admin/users?msg=resend_fail&err=" + encodeURIComponent(errMsg) + "&user_id=" + id);
   }
 });
 
@@ -5970,12 +6058,13 @@ app.get("/admin/online", requireRoleHtml(["admin", "superuser"]), async (req, re
 const INACTIVE_DAYS = Number(process.env.INACTIVE_USER_DAYS) || 7;
 
 async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang) {
-  if (!mailTransport) return false;
+  if (!mailTransport) return { ok: false, error: "Email no configurado" };
   const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
   const GUIDE_BASE = process.env.GUIDE_BASE_URL || FRONTEND;
   const pdfDe = `${GUIDE_BASE}/guides/MediControl_Guide_DE.pdf`;
   const pdfEs = `${GUIDE_BASE}/guides/MediControl_Guide_ES.pdf`;
   const pdfEn = `${GUIDE_BASE}/guides/MediControl_Guide_EN.pdf`;
+  const familyIdDisplay = familyId != null ? familyId : "-";
   const translations = {
     "de-CH": {
       subject: "Willkommen bei MediControl — Ihre Zugangsdaten",
@@ -5988,7 +6077,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       change_pw: "Bitte ändern Sie Ihr Passwort beim ersten Login.",
       steps_title: "So starten Sie",
       step1: `Öffnen Sie <a href="${FRONTEND}">${FRONTEND}</a>`,
-      step2: `Geben Sie Family ID: <strong>${familyId}</strong>, E-Mail und Passwort ein`,
+      step2: `Geben Sie Family ID: <strong>${familyIdDisplay}</strong>, E-Mail und Passwort ein`,
       step3: "Ändern Sie Ihr Passwort",
       step4: "Fügen Sie Ihre Medikamente hinzu (manuell oder per Rezept-Scan)",
       step5: "Aktivieren Sie Push-Benachrichtigungen für Erinnerungen",
@@ -6011,7 +6100,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       change_pw: "Por favor cambia tu contraseña en el primer login.",
       steps_title: "Cómo empezar",
       step1: `Abre <a href="${FRONTEND}">${FRONTEND}</a>`,
-      step2: `Ingresa Family ID: <strong>${familyId}</strong>, email y contraseña`,
+      step2: `Ingresa Family ID: <strong>${familyIdDisplay}</strong>, email y contraseña`,
       step3: "Cambia tu contraseña",
       step4: "Añade tus medicamentos (manual o escaneando receta)",
       step5: "Activa las notificaciones push para recordatorios",
@@ -6034,7 +6123,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       change_pw: "Please change your password on first login.",
       steps_title: "How to get started",
       step1: `Open <a href="${FRONTEND}">${FRONTEND}</a>`,
-      step2: `Enter Family ID: <strong>${familyId}</strong>, email and password`,
+      step2: `Enter Family ID: <strong>${familyIdDisplay}</strong>, email and password`,
       step3: "Change your password",
       step4: "Add your medications (manually or by scanning a prescription)",
       step5: "Enable push notifications for reminders",
@@ -6059,7 +6148,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       <div style="background:#f0fdf4; border:2px solid #34d399; border-radius:12px; padding:20px; margin:20px 0;">
         <h3 style="color:#166534; margin:0 0 12px;">${t.credentials}</h3>
         <table style="width:100%; font-size:14px;">
-          <tr><td style="color:#64748b; padding:4px 0;">${t.family_id}:</td><td style="font-weight:bold; color:#0f172a;">${familyId}</td></tr>
+          <tr><td style="color:#64748b; padding:4px 0;">${t.family_id}:</td><td style="font-weight:bold; color:#0f172a;">${familyIdDisplay}</td></tr>
           <tr><td style="color:#64748b; padding:4px 0;">${t.email_label}:</td><td style="font-weight:bold; color:#0f172a;">${email}</td></tr>
           <tr><td style="color:#64748b; padding:4px 0;">${t.password}:</td><td style="font-weight:bold; color:#dc2626; font-family:monospace; font-size:16px;">${tempPassword}</td></tr>
         </table>
@@ -6097,10 +6186,12 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
         mailTransport.sendMail({ from: SMTP_USER, to: email, subject: t.subject, html: emailHtml }),
         new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
       ]);
-      return true;
+      return { ok: true };
     } catch (e) {
       lastError = e;
-      console.error(`[RESEND WELCOME] Intento ${attempt}/${MAX_RETRIES} fallido:`, e.message);
+      const errDetail = e?.message || String(e);
+      const errJson = e?.response?.data ? JSON.stringify(e.response.data) : "";
+      console.error(`[RESEND WELCOME] Intento ${attempt}/${MAX_RETRIES} fallido para ${email}:`, errDetail, errJson || "");
       if (attempt < MAX_RETRIES) {
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
       }
@@ -6120,7 +6211,7 @@ async function sendWelcomeEmailToUser(name, email, familyId, tempPassword, lang)
       console.error("[RESEND WELCOME] No se pudo notificar al admin:", adminErr.message);
     }
   }
-  return false;
+  return { ok: false, error: lastError?.message || "Desconocido" };
 }
 
 app.get("/admin/inactive-users", requireRoleHtml(["admin"]), async (req, res) => {
@@ -6128,12 +6219,15 @@ app.get("/admin/inactive-users", requireRoleHtml(["admin"]), async (req, res) =>
     const msg = req.query.msg;
     const count = req.query.count || "";
     const failed = req.query.failed || "";
+    const errDetail = (req.query.err || "").trim();
     const msgHtml = msg === "deleted"
       ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuarios borrados correctamente.</div>'
       : msg === "resend_ok"
       ? `<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Email de bienvenida reenviado correctamente${count ? ` (${count} enviados)` : ""}${failed ? `. ${failed} fallaron (revisa SMTP).` : ""}</div>`
       : msg === "resend_fail"
-      ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Ajustes → Email. En Render Free usa RESEND_API_KEY (resend.com).</div>'
+      ? (errDetail
+        ? `<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;"><strong>Error Resend:</strong> ${escapeHtml(errDetail)}<br><br><strong>Solución:</strong> Verifica un dominio en <a href="https://resend.com/domains" target="_blank" rel="noopener">resend.com/domains</a> y configura <code>FROM_EMAIL</code> con ese dominio.</div>`
+        : '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Error al enviar el email. Revisa Ajustes → Email. En Render Free usa BREVO_API_KEY (brevo.com) o RESEND_API_KEY (resend.com).</div>')
       : msg === "no_selection"
       ? '<div style="background:#fef2f2; border:1px solid #ef4444; border-radius:12px; padding:12px; margin-bottom:16px; color:#991b1b;">Selecciona al menos un usuario.</div>'
       : "";
@@ -6201,7 +6295,7 @@ app.get("/admin/inactive-users", requireRoleHtml(["admin"]), async (req, res) =>
                   <td><span class="badge ${u.auth_provider === "email" ? "info" : "warn"}">${escapeHtml(u.auth_provider || "email")}</span></td>
                   <td>${escapeHtml(u.family_name || "-")} (${u.family_id || "-"})</td>
                   <td style="font-size:11px;">${u.created_at ? new Date(u.created_at).toLocaleString("de-CH", { timeZone: "Europe/Zurich", day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "-"}</td>
-                  <td>${canResend ? `<form method="POST" action="/admin/resend-welcome-email" style="display:inline;"><input type="hidden" name="user_id" value="${u.id}" /><button type="submit" class="btn outline" style="padding:6px 12px; font-size:12px;">Reenviar email</button></form>` : "-"}</td>
+                  <td>${canResend ? `<form method="POST" action="/admin/resend-welcome-email" style="display:inline;"><input type="hidden" name="user_id" value="${u.id}" /><button type="submit" class="btn outline" style="padding:6px 12px; font-size:12px;">📧 Reenviar</button></form>` : ""} <a href="/admin/show-password/${u.id}" class="btn outline" style="padding:6px 12px; font-size:12px; display:inline-block; margin-top:4px;" title="Obtener contraseña para copiar y enviar por WhatsApp">🔑</a></td>
                 </tr>`;
                   }).join("")}
               </tbody>
@@ -6277,11 +6371,13 @@ app.post("/admin/resend-welcome-email", requireRoleHtml(["admin"]), async (req, 
     const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
     const hashed = await bcrypt.hash(tempPassword, 10);
     await pool.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hashed, userId]);
-    const sent = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
-    res.redirect("/admin/inactive-users?msg=" + (sent ? "resend_ok" : "resend_fail"));
+    const result = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
+    const errParam = !result?.ok && result?.error ? "&err=" + encodeURIComponent(String(result.error).slice(0, 250).replace(/[\r\n<>]/g, "")) : "";
+    res.redirect("/admin/inactive-users?msg=" + (result?.ok ? "resend_ok" : "resend_fail") + errParam);
   } catch (err) {
+    const errMsg = (err?.message || String(err)).slice(0, 250).replace(/[\r\n<>]/g, "");
     console.error("[ADMIN RESEND WELCOME]", err.message);
-    res.redirect("/admin/inactive-users?msg=resend_fail");
+    res.redirect("/admin/inactive-users?msg=resend_fail&err=" + encodeURIComponent(errMsg));
   }
 });
 
@@ -6297,8 +6393,8 @@ app.post("/admin/resend-welcome-email-all", requireRoleHtml(["admin"]), async (r
       const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
       const hashed = await bcrypt.hash(tempPassword, 10);
       await pool.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hashed, u.id]);
-      const ok = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
-      if (ok) sent++; else failed++;
+      const res = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
+      if (res?.ok) sent++; else failed++;
     }
     const msg = sent > 0 ? `resend_ok&count=${sent}` : "resend_fail";
     res.redirect("/admin/inactive-users?msg=" + msg + (failed > 0 ? `&failed=${failed}` : ""));
@@ -7519,13 +7615,13 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
   const smtpFailHint = smtpCode === "EAUTH"
     ? "Error de autenticación: usa contraseña de aplicación de Gmail (no la contraseña normal)."
     : smtpCode === "ECONNECTION" || smtpCode === "ETIMEDOUT"
-    ? "Render Free bloquea SMTP. Añade RESEND_API_KEY (resend.com) en Render → Environment."
-    : "Revisa SMTP_HOST, SMTP_USER, SMTP_PASS. Gmail: usa contraseña de aplicación.";
+    ? "Render Free bloquea SMTP. Añade BREVO_API_KEY (brevo.com, sin dominio) o RESEND_API_KEY (resend.com, con dominio) en Render → Environment."
+    : "Revisa SMTP_HOST, SMTP_USER, SMTP_PASS. O usa BREVO_API_KEY / RESEND_API_KEY.";
   const content = `
     ${settingsMsg === "snapshot_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Snapshot creado correctamente.</p></div>' : ""}
     ${settingsMsg === "restored" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Base de datos restaurada correctamente desde backup.</p></div>' : ""}
     ${settingsMsg === "smtp_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Email de prueba enviado correctamente. Revisa la bandeja de ADMIN_EMAIL.</p></div>' : ""}
-    ${settingsMsg === "email_not_configured" ? '<div class="card" style="background:#fef3c7; border-color:#f59e0b; margin-bottom:12px;"><p style="margin:0; font-size:14px;"><strong>Email no configurado.</strong> Render Free bloquea SMTP. Añade <code>RESEND_API_KEY</code> en Render → Environment. <a href="https://resend.com" target="_blank">resend.com</a> → API Keys → Crear → Copiar key (re_xxx)</p></div>' : ""}
+    ${settingsMsg === "email_not_configured" ? '<div class="card" style="background:#fef3c7; border-color:#f59e0b; margin-bottom:12px;"><p style="margin:0; font-size:14px;"><strong>Email no configurado.</strong> Render Free bloquea SMTP. Opción 1 (sin dominio): <a href="https://www.brevo.com" target="_blank">Brevo.com</a> → API Key → <code>BREVO_API_KEY</code>. Opción 2: <a href="https://resend.com" target="_blank">Resend.com</a> → <code>RESEND_API_KEY</code> (requiere dominio).</p></div>' : ""}
     ${settingsMsg === "smtp_fail" ? `<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error SMTP${smtpCode ? " (" + escapeHtml(smtpCode) + ")" : ""}. ${smtpFailHint}</p></div>` : ""}
     <style>
       .link-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
@@ -7541,20 +7637,24 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
     ${isAdmin ? `
     <div class="card" style="margin-bottom:24px;">
       <h1>📧 Configuración de email</h1>
-      <p class="muted" style="font-size:13px; margin-top:6px;">Proveedor: ${RESEND_API_KEY ? "✅ Resend (API)" : nodemailerTransport ? "SMTP" : "❌ No configurado"}</p>
+      <p class="muted" style="font-size:13px; margin-top:6px;">Proveedor: ${RESEND_API_KEY ? "✅ Resend (API)" : BREVO_API_KEY ? "✅ Brevo (API)" : nodemailerTransport ? "SMTP" : "❌ No configurado"}</p>
       ${smtpOk ? `
       <form method="POST" action="/admin/smtp-test" style="margin-top:12px;">
         <button type="submit" class="btn outline">Enviar email de prueba a ${escapeHtml(process.env.ADMIN_EMAIL || "ADMIN_EMAIL")}</button>
       </form>
       ${RESEND_API_KEY ? `
-      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Resend: funciona en Render Free (no bloquea puertos SMTP). FROM_EMAIL: dominio verificado en resend.com</p>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Resend: funciona en Render Free. FROM_EMAIL: dominio verificado en resend.com o onboarding@resend.dev (solo a tu email)</p>
+      ` : BREVO_API_KEY ? `
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">Brevo: 300 emails/día gratis. <strong>Sin dominio propio:</strong> verifica un email (ej. alertas.medicamentos@gmail.com) en brevo.com → Remitentes. FROM_EMAIL=MediControl &lt;tu-email-verificado@gmail.com&gt;</p>
       ` : `
-      <p style="font-size:12px; color:var(--muted); margin-top:8px;">SMTP: Render Free bloquea puertos 587/465. Usa <strong>RESEND_API_KEY</strong> (resend.com) o plan de pago.</p>
-      <p style="font-size:12px; color:var(--muted); margin-top:4px;">Gmail: contraseña de aplicación. Cuenta Google → Seguridad → Verificación en 2 pasos → Contraseñas de aplicaciones.</p>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;"><strong>SMTP no funciona en Render Free</strong> (bloquea puertos 587/465).</p>
+      <p style="font-size:12px; color:var(--muted); margin-top:4px;"><strong>Recomendado (sin dominio):</strong> Añade <code>BREVO_API_KEY</code> en Render. Brevo: 300 emails/día gratis. Ver guía <code>BREVO_SETUP.md</code>.</p>
+      <p style="font-size:12px; color:var(--muted); margin-top:4px;"><strong>Alternativa:</strong> <code>RESEND_API_KEY</code> (requiere dominio verificado en resend.com).</p>
       `}
       ` : `
-      <p style="font-size:13px; margin-top:8px;"><strong>Opción 1 (recomendada para Render Free):</strong> Resend.com → API Key → Variable <code>RESEND_API_KEY</code>. FROM_EMAIL=tu-dominio@verificado.com</p>
-      <p style="font-size:13px; margin-top:4px;"><strong>Opción 2:</strong> SMTP (Render Paid): SMTP_HOST, SMTP_USER, SMTP_PASS</p>
+      <p style="font-size:13px; margin-top:8px;"><strong>Opción 1 (sin dominio):</strong> <a href="https://www.brevo.com" target="_blank">Brevo.com</a> → Cuenta gratis → SMTP & API → API Key → Variable <code>BREVO_API_KEY</code>. Verifica tu email (ej. alertas.medicamentos@gmail.com) en Remitentes. <code>FROM_EMAIL=MediControl &lt;alertas.medicamentos@gmail.com&gt;</code></p>
+      <p style="font-size:13px; margin-top:4px;"><strong>Opción 2 (con dominio):</strong> Resend.com → API Key → <code>RESEND_API_KEY</code>. Verifica dominio en resend.com/domains.</p>
+      <p style="font-size:13px; margin-top:4px;"><strong>Opción 3:</strong> SMTP (Render Paid): SMTP_HOST, SMTP_USER, SMTP_PASS</p>
       `}
     </div>
 

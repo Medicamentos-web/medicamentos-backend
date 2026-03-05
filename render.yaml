@@ -16,8 +16,14 @@ services:
         value: production
       - key: DEFAULT_TEMP_PASSWORD
         value: "123456"
+      # Email: usa BREVO_API_KEY (recomendado, funciona en Render Free) o RESEND_API_KEY
+      - key: BREVO_API_KEY
+        sync: false
+      - key: FROM_EMAIL
+        value: "MediControl <alertas.medicamentos@gmail.com>"
+      # SMTP no funciona en Render Free (puertos bloqueados). Solo para planes de pago.
       - key: SMTP_HOST
-        value: smtp.gmail.com
+        sync: false
       - key: SMTP_PORT
         value: "587"
       - key: SMTP_USER
