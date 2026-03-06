@@ -2780,15 +2780,17 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     : "";
   const content = `
     <style>
-      .users-top { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px 20px; margin-bottom:12px; }
-      .users-header { display:flex; align-items:center; justify-content:space-between; flex:1; min-width:200px; gap:8px; }
-      .users-header h1 { margin:0; font-size:18px; font-weight:700; }
-      .users-filters { display:flex; gap:6px; flex-wrap:wrap; align-items:center; flex:1; min-width:280px; }
-      .users-filters input, .users-filters select { padding:5px 8px; border:1px solid var(--border); border-radius:6px; font-size:12px; }
-      .users-filters input { width:160px; min-width:140px; }
-      .users-filters select { min-width:100px; }
-      .users-filters .btn { padding:5px 10px; font-size:12px; }
-      .users-table-wrap { margin-top:8px; border:1px solid var(--border); border-radius:8px; overflow-x:auto; }
+      .users-page-header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border); }
+      .users-page-title { margin:0; font-size:18px; font-weight:700; color:var(--ink); display:flex; align-items:center; gap:8px; }
+      .users-page-actions { display:flex; gap:8px; align-items:center; }
+      .users-page-actions .btn { padding:8px 14px; font-size:13px; border-radius:8px; }
+      .users-page-toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+      .users-page-toolbar input, .users-page-toolbar select { padding:8px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px; }
+      .users-page-toolbar input { min-width:200px; flex:1; max-width:280px; }
+      .users-page-toolbar select { min-width:130px; }
+      .users-page-toolbar .btn { padding:8px 14px; font-size:13px; border-radius:8px; }
+      .users-page-toolbar { margin-bottom:16px; }
+      .users-table-wrap { border:1px solid var(--border); border-radius:10px; overflow-x:auto; }
       .users-table { width:100%; border-collapse:collapse; font-size:12px; }
       .users-table th, .users-table td { padding:4px 6px; text-align:left; border-bottom:1px solid var(--border); vertical-align:middle; }
       .users-table th { background:var(--bg); font-weight:600; color:var(--muted); font-size:11px; white-space:nowrap; }
@@ -2821,19 +2823,18 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
       .user-actions-cell button { cursor:pointer; font-family:inherit; }
       .users-empty { text-align:center; padding:24px 12px; color:var(--muted); }
       .users-empty p { margin:0 0 10px; font-size:13px; }
-      .users-page.card { padding:10px 14px; }
+      .users-page.card { padding:20px 24px; }
     </style>
     <div class="card users-page">
       ${msgHtml}
-      <div class="users-top">
-        <div class="users-header">
-          <h1>👤 Pacientes y usuarios</h1>
-          <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            ${isAdmin ? '<a class="btn outline" href="/admin/merge-users">🔀 Fusionar</a>' : ""}
-            <a class="btn primary" href="/admin/user-new">➕ Nuevo</a>
-          </div>
+      <header class="users-page-header">
+        <h1 class="users-page-title">👤 Pacientes y usuarios</h1>
+        <div class="users-page-actions">
+          ${isAdmin ? '<a class="btn outline" href="/admin/merge-users">🔀 Fusionar usuarios</a>' : ""}
+          <a class="btn primary" href="/admin/user-new">➕ Nuevo usuario</a>
         </div>
-        <form method="GET" action="/admin/users" class="users-filters">
+      </header>
+      <form method="GET" action="/admin/users" class="users-page-toolbar">
         <input name="q" type="search" placeholder="Buscar por nombre, email${isAdmin ? " o familia" : ""}..." value="${escapeHtml(q)}" />
         ${isAdmin && familiesForFilter.length ? `
         <select name="family_id">
@@ -2847,8 +2848,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
           <option value="superuser" ${roleFilter === "superuser" ? "selected" : ""}>Superuser</option>
         </select>
         <button type="submit" class="btn outline">🔎 Filtrar</button>
-        </form>
-      </div>
+      </form>
       ${
         rows.length === 0
           ? `
