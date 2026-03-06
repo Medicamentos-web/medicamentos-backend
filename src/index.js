@@ -7729,6 +7729,13 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
 
       <div class="section-title">🚀 Despliegue y hosting</div>
       <div class="link-grid">
+        <a class="link-card" href="https://dashboard.render.com" target="_blank">
+          <div class="link-icon" style="background:#46e3b7; color:#0f172a;">R</div>
+          <div class="link-meta">
+            <h3>Render Dashboard</h3>
+            <p>Backend · Environment (BREVO_API_KEY, etc.) · Root Directory = vacío</p>
+          </div>
+        </a>
         <a class="link-card" href="https://vercel.com/dashboard" target="_blank">
           <div class="link-icon" style="background:#000; color:#fff;">▲</div>
           <div class="link-meta">
@@ -7736,18 +7743,18 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
             <p>Frontend · Deployments · Logs · Variables</p>
           </div>
         </a>
-        <a class="link-card" href="https://dashboard.render.com" target="_blank">
-          <div class="link-icon" style="background:#46e3b7; color:#0f172a;">R</div>
+        <a class="link-card" href="https://app.brevo.com/settings/keys/api" target="_blank">
+          <div class="link-icon" style="background:#0696d7; color:#fff;">📧</div>
           <div class="link-meta">
-            <h3>Render Dashboard</h3>
-            <p>Backend · Logs · Environment · Deploys</p>
+            <h3>Brevo</h3>
+            <p>API Keys · Emails · Remitentes (BREVO_API_KEY)</p>
           </div>
         </a>
         <a class="link-card" href="https://resend.com/dashboard" target="_blank">
           <div class="link-icon" style="background:#6366f1; color:#fff;">📧</div>
           <div class="link-meta">
             <h3>Resend</h3>
-            <p>Emails · API Keys · Dominios</p>
+            <p>Emails · API Keys · Dominios (alternativa a Brevo)</p>
           </div>
         </a>
         <a class="link-card" href="https://dashboard.stripe.com" target="_blank">
@@ -7768,11 +7775,18 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
 
       <div class="section-title">💻 Código fuente</div>
       <div class="link-grid">
+        <a class="link-card" href="https://github.com/Medicamentos-web/medicamentos-backend" target="_blank">
+          <div class="link-icon" style="background:#24292e; color:#fff;">🐙</div>
+          <div class="link-meta">
+            <h3>GitHub — Backend</h3>
+            <p>Repo que Render despliega · Root Directory vacío</p>
+          </div>
+        </a>
         <a class="link-card" href="https://github.com/Medicamentos-web/medicamentos-frontend" target="_blank">
           <div class="link-icon" style="background:#24292e; color:#fff;">🐙</div>
           <div class="link-meta">
             <h3>GitHub — Frontend</h3>
-            <p>Repositorio Next.js · Commits · PRs · Issues</p>
+            <p>Repositorio Next.js · Vercel despliega</p>
           </div>
         </a>
       </div>
