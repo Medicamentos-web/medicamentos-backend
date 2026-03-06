@@ -1472,6 +1472,7 @@ function renderShell(req, title, active, content) {
       items: [
         { key: "dose", label: "Cambios de dosis", href: "/admin/dose-requests", icon: "🩺" },
         { key: "history", label: "Historial médico", href: "/admin/medical-records", icon: "📁" },
+        { key: "stock-report", label: "Reporte stock", href: "/admin/stock-report", icon: "📋" },
         { key: "imports", label: "Importar", href: "/admin/import", icon: "⬆" },
       ],
     },
@@ -4975,6 +4976,192 @@ app.get("/admin/meds-critical/pdf", requireRoleHtml(["admin", "superuser"]), asy
 });
 
 // =============================================================================
+// STOCK REPORT (paciente + admin)
+// =============================================================================
+app.get("/api/stock-report", requireAuth, async (req, res) => {
+  const familyId = getFamilyId(req);
+  const userId = Number(req.query.user_id || req.query.userId || req.user?.sub);
+  const isAdmin = req.user?.role === "admin" || req.user?.role === "superuser";
+
+  if (!familyId || !Number.isFinite(userId)) {
+    return res.status(400).json({ error: "family_id y user_id requeridos" });
+  }
+  if (!isAdmin && userId !== req.user.sub) {
+    return res.status(403).json({ error: "Solo puedes ver tu propio reporte" });
+  }
+
+  try {
+    const [userRow, meds] = await Promise.all([
+      pool.query(`SELECT name, email FROM users WHERE id = $1 AND family_id = $2`, [userId, familyId]),
+      pool.query(
+        `SELECT id, name, dosage, current_stock, expiration_date
+         FROM medicines
+         WHERE family_id = $1 AND user_id = $2
+         ORDER BY current_stock ASC, name ASC`,
+        [familyId, userId]
+      ),
+    ]);
+    const patient = userRow.rows[0];
+    if (!patient) return res.status(404).json({ error: "Usuario no encontrado" });
+
+    const items = meds.rows.map((m) => {
+      const stock = Number(m.current_stock) || 0;
+      let status = "ok";
+      if (stock === 0) status = "faltante";
+      else if (stock <= LOW_STOCK_THRESHOLD) status = "bajo";
+      return {
+        id: m.id,
+        name: m.name,
+        dosage: m.dosage || "N/A",
+        current_stock: stock,
+        expiration_date: m.expiration_date,
+        status,
+      };
+    });
+
+    const summary = {
+      total: items.length,
+      ok: items.filter((i) => i.status === "ok").length,
+      bajo: items.filter((i) => i.status === "bajo").length,
+      faltante: items.filter((i) => i.status === "faltante").length,
+    };
+
+    res.json({
+      patient_name: patient.name,
+      patient_email: patient.email,
+      generated_at: new Date().toISOString(),
+      summary,
+      items,
+    });
+  } catch (err) {
+    console.error("[STOCK-REPORT]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/stock-report/pdf", requireAuth, async (req, res) => {
+  const familyId = getFamilyId(req);
+  const userId = Number(req.query.user_id || req.query.userId || req.user?.sub);
+  const isAdmin = req.user?.role === "admin" || req.user?.role === "superuser";
+
+  if (!familyId || !Number.isFinite(userId)) {
+    return res.status(400).send("Parámetros inválidos");
+  }
+  if (!isAdmin && userId !== req.user.sub) {
+    return res.status(403).send("Acceso denegado");
+  }
+
+  try {
+    const [userRow, meds] = await Promise.all([
+      pool.query(`SELECT name FROM users WHERE id = $1 AND family_id = $2`, [userId, familyId]),
+      pool.query(
+        `SELECT name, dosage, current_stock, expiration_date
+         FROM medicines
+         WHERE family_id = $1 AND user_id = $2
+         ORDER BY current_stock ASC, name ASC`,
+        [familyId, userId]
+      ),
+    ]);
+    const patientName = userRow.rows[0]?.name || "Paciente";
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="inventario_medicamentos_${userId}.pdf"`);
+
+    const doc = new PDFDocument({ margin: 40 });
+    doc.pipe(res);
+    doc.fontSize(18).text("Inventario de medicamentos", { align: "left" });
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`Paciente: ${patientName}`);
+    doc.text(`Fecha: ${formatDateOnlyDisplay(new Date())}`);
+    doc.moveDown();
+
+    if (!meds.rows.length) {
+      doc.text("No hay medicamentos registrados.");
+    } else {
+      doc.fontSize(11).text("Lista detallada:", { continued: false });
+      doc.moveDown(0.3);
+      meds.rows.forEach((m) => {
+        const stock = Number(m.current_stock) || 0;
+        const status = stock === 0 ? "⚠ FALTA" : stock <= LOW_STOCK_THRESHOLD ? "⚠ Bajo" : "✓";
+        const exp = m.expiration_date ? formatDateOnlyDisplay(m.expiration_date) : "-";
+        doc.text(`${m.name} · ${m.dosage || "N/A"} · Stock: ${stock} ${status} · Caducidad: ${exp}`);
+      });
+    }
+    doc.end();
+  } catch (err) {
+    console.error("[STOCK-REPORT PDF]", err.message);
+    res.status(500).send("Error al generar PDF");
+  }
+});
+
+app.post("/api/stock-report/send", requireAuth, async (req, res) => {
+  const familyId = getFamilyId(req);
+  const userId = Number(req.body?.user_id || req.body?.userId || req.user?.sub);
+  const isAdmin = req.user?.role === "admin" || req.user?.role === "superuser";
+
+  if (!familyId || !Number.isFinite(userId)) {
+    return res.status(400).json({ error: "user_id requerido" });
+  }
+  if (!isAdmin && userId !== req.user.sub) {
+    return res.status(403).json({ error: "Solo puedes enviarte a ti mismo" });
+  }
+  if (!mailTransport) {
+    return res.status(503).json({ error: "Email no configurado. Configura BREVO_API_KEY o RESEND_API_KEY en Render." });
+  }
+
+  try {
+    const [userRow, meds] = await Promise.all([
+      pool.query(`SELECT name, email FROM users WHERE id = $1 AND family_id = $2`, [userId, familyId]),
+      pool.query(
+        `SELECT name, dosage, current_stock, expiration_date
+         FROM medicines
+         WHERE family_id = $1 AND user_id = $2
+         ORDER BY current_stock ASC, name ASC`,
+        [familyId, userId]
+      ),
+    ]);
+    const patient = userRow.rows[0];
+    if (!patient?.email) {
+      return res.status(400).json({ error: "El paciente no tiene email registrado" });
+    }
+
+    const fromAddr = (RESEND_API_KEY || BREVO_API_KEY) ? FROM_EMAIL : SMTP_USER;
+    const rows = meds.rows
+      .map((m) => {
+        const stock = Number(m.current_stock) || 0;
+        const status = stock === 0 ? "⚠ FALTA" : stock <= LOW_STOCK_THRESHOLD ? "⚠ Bajo" : "✓";
+        const exp = m.expiration_date ? formatDateOnlyDisplay(m.expiration_date) : "-";
+        return `<tr><td>${escapeHtml(m.name)}</td><td>${escapeHtml(m.dosage || "N/A")}</td><td>${stock}</td><td>${status}</td><td>${exp}</td></tr>`;
+      })
+      .join("");
+
+    const html = `
+      <div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;">
+        <h2>Inventario de medicamentos – MediControl</h2>
+        <p>Hola ${escapeHtml(patient.name || "Paciente")},</p>
+        <p>Aquí tienes tu lista detallada de medicamentos y stock actual:</p>
+        <table style="width:100%; border-collapse:collapse; margin:16px 0;">
+          <thead><tr style="background:#f1f5f9;"><th style="padding:8px; text-align:left;">Medicamento</th><th>Dosis</th><th>Stock</th><th>Estado</th><th>Caducidad</th></tr></thead>
+          <tbody>${rows || "<tr><td colspan='5'>No hay medicamentos registrados.</td></tr>"}</tbody>
+        </table>
+        <p style="color:#64748b; font-size:12px;">Generado el ${formatDateOnlyDisplay(new Date())}. MediControl.</p>
+      </div>`;
+
+    await mailTransport.sendMail({
+      from: fromAddr,
+      to: patient.email,
+      subject: `Tu inventario de medicamentos – MediControl`,
+      html,
+    });
+
+    res.json({ ok: true, message: "Reporte enviado por email" });
+  } catch (err) {
+    console.error("[STOCK-REPORT SEND]", err.message);
+    res.status(500).json({ error: err.message || "Error al enviar email" });
+  }
+});
+
+// =============================================================================
 // PUSH NOTIFICATIONS
 // =============================================================================
 app.get("/api/push/vapid", async (_req, res) => {
@@ -6582,6 +6769,270 @@ app.get("/admin/reports", requireRoleHtml(["admin", "superuser"]), async (req, r
   } catch (err) {
     console.error("[ADMIN REPORTS]", err.message);
     res.status(500).send("Error al cargar informes");
+  }
+});
+
+// =============================================================================
+// CRON: envío automático de reportes de stock (Render Cron Job)
+// GET /api/cron/stock-report?secret=XXX  → envía a pacientes con stock bajo/faltante
+// =============================================================================
+app.get("/api/cron/stock-report", async (req, res) => {
+  const secret = process.env.CRON_SECRET || "cron-stock-report-secret";
+  if (req.query?.secret !== secret) {
+    return res.status(403).json({ error: "No autorizado" });
+  }
+  if (!mailTransport) {
+    return res.status(503).json({ error: "Email no configurado" });
+  }
+  try {
+    const users = await pool.query(
+      `SELECT DISTINCT u.id, u.name, u.email, u.family_id
+       FROM users u
+       JOIN medicines m ON m.user_id = u.id AND m.family_id = u.family_id
+       WHERE u.email IS NOT NULL AND u.email != ''
+         AND (COALESCE(m.current_stock,0) = 0 OR COALESCE(m.current_stock,0) <= $1)`,
+      [LOW_STOCK_THRESHOLD]
+    );
+    let sent = 0;
+    for (const u of users.rows) {
+      try {
+        const [userRow, meds] = await Promise.all([
+          pool.query(`SELECT name, email FROM users WHERE id = $1 AND family_id = $2`, [u.id, u.family_id]),
+          pool.query(`SELECT name, dosage, current_stock, expiration_date FROM medicines WHERE family_id = $1 AND user_id = $2 ORDER BY current_stock ASC, name ASC`, [u.family_id, u.id]),
+        ]);
+        const patient = userRow.rows[0];
+        if (!patient?.email) continue;
+        const fromAddr = (RESEND_API_KEY || BREVO_API_KEY) ? FROM_EMAIL : SMTP_USER;
+        const rows = meds.rows.map((m) => {
+          const stock = Number(m.current_stock) || 0;
+          const status = stock === 0 ? "⚠ FALTA" : stock <= LOW_STOCK_THRESHOLD ? "⚠ Bajo" : "✓";
+          const exp = m.expiration_date ? formatDateOnlyDisplay(m.expiration_date) : "-";
+          return `<tr><td>${escapeHtml(m.name)}</td><td>${escapeHtml(m.dosage || "N/A")}</td><td>${stock}</td><td>${status}</td><td>${exp}</td></tr>`;
+        }).join("");
+        const lowCount = meds.rows.filter((m) => (Number(m.current_stock) || 0) === 0 || (Number(m.current_stock) || 0) <= LOW_STOCK_THRESHOLD).length;
+        const html = `<div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;"><h2>Inventario de medicamentos – MediControl</h2><p>Hola ${escapeHtml(patient.name || "Paciente")},</p><p>Tu lista de medicamentos y stock actual${lowCount > 0 ? ` (${lowCount} con stock bajo o faltante)` : ""}:</p><table style="width:100%; border-collapse:collapse; margin:16px 0;"><thead><tr style="background:#f1f5f9;"><th style="padding:8px; text-align:left;">Medicamento</th><th>Dosis</th><th>Stock</th><th>Estado</th><th>Caducidad</th></tr></thead><tbody>${rows}</tbody></table><p style="color:#64748b; font-size:12px;">Generado el ${formatDateOnlyDisplay(new Date())}. MediControl.</p></div>`;
+        await mailTransport.sendMail({ from: fromAddr, to: patient.email, subject: `Tu inventario de medicamentos – MediControl`, html });
+        sent++;
+      } catch (e) { console.error("[CRON STOCK] Error usuario", u.id, e.message); }
+    }
+    res.json({ ok: true, sent, total: users.rows.length });
+  } catch (err) {
+    console.error("[CRON STOCK]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =============================================================================
+// ADMIN STOCK REPORT
+// =============================================================================
+app.get("/admin/stock-report", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  try {
+    const familyId = req.user.family_id;
+    const selectedUserId = Number(req.query.user_id) || null;
+    const stockMsg = req.query?.msg || "";
+    const sentCount = req.query?.sent || "";
+
+    const usersResult = await pool.query(
+      `SELECT u.id, u.name, u.email,
+        (SELECT COUNT(*) FROM medicines m WHERE m.user_id = u.id AND m.family_id = u.family_id) AS med_count,
+        (SELECT COUNT(*) FROM medicines m WHERE m.user_id = u.id AND m.family_id = u.family_id AND (COALESCE(m.current_stock,0) = 0 OR COALESCE(m.current_stock,0) <= $2)) AS low_count
+       FROM users u
+       WHERE u.family_id = $1
+       ORDER BY u.name ASC`,
+      [familyId, LOW_STOCK_THRESHOLD]
+    );
+
+    let reportData = null;
+    if (selectedUserId) {
+      const [userRow, meds] = await Promise.all([
+        pool.query(`SELECT name, email FROM users WHERE id = $1 AND family_id = $2`, [selectedUserId, familyId]),
+        pool.query(
+          `SELECT id, name, dosage, current_stock, expiration_date
+           FROM medicines
+           WHERE family_id = $1 AND user_id = $2
+           ORDER BY current_stock ASC, name ASC`,
+          [familyId, selectedUserId]
+        ),
+      ]);
+      const patient = userRow.rows[0];
+      if (patient) {
+        const items = meds.rows.map((m) => {
+          const stock = Number(m.current_stock) || 0;
+          let status = "ok";
+          if (stock === 0) status = "faltante";
+          else if (stock <= LOW_STOCK_THRESHOLD) status = "bajo";
+          return { ...m, current_stock: stock, status };
+        });
+        reportData = {
+          patient,
+          items,
+          summary: {
+            total: items.length,
+            ok: items.filter((i) => i.status === "ok").length,
+            bajo: items.filter((i) => i.status === "bajo").length,
+            faltante: items.filter((i) => i.status === "faltante").length,
+          },
+        };
+      }
+    }
+
+    const msgHtml = stockMsg === "send_ok" ? '<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Reporte enviado por email correctamente.</p></div>' :
+      stockMsg === "send_error" ? '<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error al enviar el email.</p></div>' :
+      stockMsg === "send_all_ok" ? `<div class="card" style="background:#dcfce7; border-color:#22c55e; margin-bottom:12px;"><p style="margin:0; font-size:14px;">✅ Reportes enviados a ${sentCount} paciente(s).</p></div>` :
+      stockMsg === "send_all_error" ? '<div class="card" style="background:#fef2f2; border-color:#ef4444; margin-bottom:12px;"><p style="margin:0; font-size:14px;">❌ Error al enviar reportes.</p></div>' :
+      stockMsg === "email_not_configured" ? '<div class="card" style="background:#fef3c7; border-color:#f59e0b; margin-bottom:12px;"><p style="margin:0; font-size:14px;">⚠️ Email no configurado. Añade BREVO_API_KEY o RESEND_API_KEY en Render.</p></div>' :
+      stockMsg === "no_email" ? '<div class="card" style="background:#fef3c7; border-color:#f59e0b; margin-bottom:12px;"><p style="margin:0; font-size:14px;">⚠️ El paciente no tiene email registrado.</p></div>' : "";
+
+    const content = `
+    <div class="card">
+      ${msgHtml}
+      <h1>📋 Reporte de stock de medicamentos</h1>
+      <p class="muted" style="font-size:13px; margin-top:6px;">Lista detallada de lo que tiene o falta cada paciente. Enviar por email, descargar PDF o envío automático vía cron.</p>
+      <p class="muted" style="font-size:11px; margin-top:4px;"><strong>Envío automático:</strong> Render Cron Job → <code>GET /api/cron/stock-report?secret=CRON_SECRET</code> envía a pacientes con stock bajo o faltante.</p>
+
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:16px 0;">
+        <form method="GET" action="/admin/stock-report" style="display:flex; gap:8px; align-items:center;">
+          <label style="font-size:13px;">Paciente:</label>
+          <select name="user_id" class="form-control" style="max-width:260px;">
+            <option value="">Seleccionar paciente</option>
+            ${usersResult.rows.map((u) => {
+              const low = Number(u.low_count) || 0;
+              const badge = low > 0 ? ` <span style="color:#d97706; font-weight:600;">(${low} bajo/faltante)</span>` : "";
+              return `<option value="${u.id}" ${selectedUserId === u.id ? "selected" : ""}>${escapeHtml(u.name || u.email || `Usuario ${u.id}`)} (${u.med_count} meds)${badge}</option>`;
+            }).join("")}
+          </select>
+          <button type="submit" class="btn outline">Ver reporte</button>
+        </form>
+        <form method="POST" action="/admin/stock-report/send-all" style="display:inline;" onsubmit="return confirm('¿Enviar reporte por email a TODOS los pacientes con medicamentos?');">
+          <button type="submit" class="btn primary">📧 Enviar a todos</button>
+        </form>
+      </div>
+
+      ${reportData ? `
+      <div style="margin-top:20px;">
+        <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;">
+          <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:10px 14px; min-width:80px;">
+            <div style="font-size:20px; font-weight:bold; color:#059669;">${reportData.summary.ok}</div>
+            <div style="font-size:11px; color:#065f46;">Stock OK</div>
+          </div>
+          <div style="background:#fef3c7; border:1px solid #fcd34d; border-radius:8px; padding:10px 14px; min-width:80px;">
+            <div style="font-size:20px; font-weight:bold; color:#d97706;">${reportData.summary.bajo}</div>
+            <div style="font-size:11px; color:#92400e;">Stock bajo</div>
+          </div>
+          <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; min-width:80px;">
+            <div style="font-size:20px; font-weight:bold; color:#dc2626;">${reportData.summary.faltante}</div>
+            <div style="font-size:11px; color:#991b1b;">Faltante</div>
+          </div>
+          <div style="flex:1" />
+          <div style="display:flex; gap:8px;">
+            <a href="/api/stock-report/pdf?user_id=${selectedUserId}" target="_blank" class="btn outline">📄 Descargar PDF</a>
+            <form method="POST" action="/admin/stock-report/send-one" style="display:inline;" onsubmit="return confirm('¿Enviar reporte por email a ${escapeHtml(reportData.patient.email)}?');">
+              <input type="hidden" name="user_id" value="${selectedUserId}" />
+              <button type="submit" class="btn primary">📧 Enviar por email</button>
+            </form>
+          </div>
+        </div>
+
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Medicamento</th>
+              <th>Dosis</th>
+              <th>Stock</th>
+              <th>Estado</th>
+              <th>Caducidad</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${reportData.items.map((m) => {
+              const badge = m.status === "faltante" ? '<span style="background:#fef2f2; color:#dc2626; padding:2px 6px; border-radius:4px; font-size:11px;">Faltante</span>'
+                : m.status === "bajo" ? '<span style="background:#fef3c7; color:#d97706; padding:2px 6px; border-radius:4px; font-size:11px;">Bajo</span>'
+                : '<span style="background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; font-size:11px;">OK</span>';
+              return `<tr>
+                <td>${escapeHtml(m.name)}</td>
+                <td>${escapeHtml(m.dosage || "N/A")}</td>
+                <td>${m.current_stock}</td>
+                <td>${badge}</td>
+                <td>${m.expiration_date ? formatDateOnlyDisplay(m.expiration_date) : "-"}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+      ` : selectedUserId ? "<p class=\"muted\" style=\"margin-top:16px;\">Usuario no encontrado.</p>" : "<p class=\"muted\" style=\"margin-top:16px;\">Selecciona un paciente para ver su reporte.</p>"}
+    </div>`;
+
+    res.send(renderShell(req, "Reporte stock", "stock-report", content));
+  } catch (err) {
+    console.error("[ADMIN STOCK-REPORT]", err.message);
+    res.status(500).send("Error al cargar reporte de stock");
+  }
+});
+
+app.post("/admin/stock-report/send-one", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const userId = Number(req.body?.user_id);
+  if (!userId || !mailTransport) {
+    return res.redirect("/admin/stock-report?msg=" + (mailTransport ? "invalid" : "email_not_configured"));
+  }
+  try {
+    const familyId = req.user.family_id;
+    const [userRow, meds] = await Promise.all([
+      pool.query(`SELECT name, email FROM users WHERE id = $1 AND family_id = $2`, [userId, familyId]),
+      pool.query(`SELECT name, dosage, current_stock, expiration_date FROM medicines WHERE family_id = $1 AND user_id = $2 ORDER BY current_stock ASC, name ASC`, [familyId, userId]),
+    ]);
+    const patient = userRow.rows[0];
+    if (!patient?.email) return res.redirect("/admin/stock-report?user_id=" + userId + "&msg=no_email");
+    const fromAddr = (RESEND_API_KEY || BREVO_API_KEY) ? FROM_EMAIL : SMTP_USER;
+    const rows = meds.rows.map((m) => {
+      const stock = Number(m.current_stock) || 0;
+      const status = stock === 0 ? "⚠ FALTA" : stock <= LOW_STOCK_THRESHOLD ? "⚠ Bajo" : "✓";
+      const exp = m.expiration_date ? formatDateOnlyDisplay(m.expiration_date) : "-";
+      return `<tr><td>${escapeHtml(m.name)}</td><td>${escapeHtml(m.dosage || "N/A")}</td><td>${stock}</td><td>${status}</td><td>${exp}</td></tr>`;
+    }).join("");
+    const html = `<div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;"><h2>Inventario de medicamentos – MediControl</h2><p>Hola ${escapeHtml(patient.name || "Paciente")},</p><p>Tu lista detallada de medicamentos y stock actual:</p><table style="width:100%; border-collapse:collapse; margin:16px 0;"><thead><tr style="background:#f1f5f9;"><th style="padding:8px; text-align:left;">Medicamento</th><th>Dosis</th><th>Stock</th><th>Estado</th><th>Caducidad</th></tr></thead><tbody>${rows}</tbody></table><p style="color:#64748b; font-size:12px;">Generado el ${formatDateOnlyDisplay(new Date())}. MediControl.</p></div>`;
+    await mailTransport.sendMail({ from: fromAddr, to: patient.email, subject: `Tu inventario de medicamentos – MediControl`, html });
+    res.redirect("/admin/stock-report?user_id=" + userId + "&msg=send_ok");
+  } catch (err) {
+    console.error("[STOCK-REPORT SEND-ONE]", err.message);
+    res.redirect("/admin/stock-report?user_id=" + (req.body?.user_id || "") + "&msg=send_error");
+  }
+});
+
+app.post("/admin/stock-report/send-all", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  if (!mailTransport) {
+    return res.redirect("/admin/stock-report?msg=email_not_configured");
+  }
+  try {
+    const familyId = req.user.family_id;
+    const users = await pool.query(
+      `SELECT u.id, u.name, u.email FROM users u
+       WHERE u.family_id = $1 AND u.email IS NOT NULL AND u.email != ''
+       AND EXISTS (SELECT 1 FROM medicines m WHERE m.user_id = u.id AND m.family_id = u.family_id)`,
+      [familyId]
+    );
+    const fromAddr = (RESEND_API_KEY || BREVO_API_KEY) ? FROM_EMAIL : SMTP_USER;
+    let sent = 0;
+    for (const u of users.rows) {
+      try {
+        const meds = await pool.query(
+          `SELECT name, dosage, current_stock, expiration_date FROM medicines WHERE family_id = $1 AND user_id = $2 ORDER BY current_stock ASC, name ASC`,
+          [familyId, u.id]
+        );
+        const rows = meds.rows.map((m) => {
+          const stock = Number(m.current_stock) || 0;
+          const status = stock === 0 ? "⚠ FALTA" : stock <= LOW_STOCK_THRESHOLD ? "⚠ Bajo" : "✓";
+          const exp = m.expiration_date ? formatDateOnlyDisplay(m.expiration_date) : "-";
+          return `<tr><td>${escapeHtml(m.name)}</td><td>${escapeHtml(m.dosage || "N/A")}</td><td>${stock}</td><td>${status}</td><td>${exp}</td></tr>`;
+        }).join("");
+        const html = `<div style="font-family:Arial,sans-serif; max-width:600px; margin:0 auto; padding:20px;"><h2>Inventario de medicamentos – MediControl</h2><p>Hola ${escapeHtml(u.name || "Paciente")},</p><p>Tu lista detallada de medicamentos y stock actual:</p><table style="width:100%; border-collapse:collapse; margin:16px 0;"><thead><tr style="background:#f1f5f9;"><th style="padding:8px; text-align:left;">Medicamento</th><th>Dosis</th><th>Stock</th><th>Estado</th><th>Caducidad</th></tr></thead><tbody>${rows}</tbody></table><p style="color:#64748b; font-size:12px;">Generado el ${formatDateOnlyDisplay(new Date())}. MediControl.</p></div>`;
+        await mailTransport.sendMail({ from: fromAddr, to: u.email, subject: `Tu inventario de medicamentos – MediControl`, html });
+        sent++;
+      } catch (e) { console.error("[SEND-ALL] Error usuario", u.id, e.message); }
+    }
+    res.redirect(`/admin/stock-report?msg=send_all_ok&sent=${sent}`);
+  } catch (err) {
+    console.error("[STOCK-REPORT SEND-ALL]", err.message);
+    res.redirect("/admin/stock-report?msg=send_all_error");
   }
 });
 
