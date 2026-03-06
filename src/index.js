@@ -2743,19 +2743,18 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
   let familiesForFilter = [];
   if (isAdmin) {
     const famRes = await pool.query(
-      `SELECT id, name FROM families ORDER BY COALESCE(NULLIF(TRIM(name),''), 'Sin nombre'), id ASC`
+      `SELECT id, name FROM families ORDER BY COALESCE(NULLIF(TRIM(name),''), 'zzz'), id ASC`
     );
     const nameCount = {};
     famRes.rows.forEach((f) => {
-      const n = (f.name || "").trim() || "Sin nombre";
-      nameCount[n] = (nameCount[n] || 0) + 1;
+      const key = (f.name || "").trim() || `Familia ${f.id}`;
+      nameCount[key] = (nameCount[key] || 0) + 1;
     });
-    familiesForFilter = famRes.rows.map((f) => ({
-      ...f,
-      displayName: (nameCount[(f.name || "").trim() || "Sin nombre"] > 1)
-        ? `${(f.name || "Sin nombre").trim()} (#${f.id})`
-        : (f.name || `Familia ${f.id}`).trim(),
-    }));
+    familiesForFilter = famRes.rows.map((f) => {
+      const key = (f.name || "").trim() || `Familia ${f.id}`;
+      const displayName = nameCount[key] > 1 ? `${key} (#${f.id})` : key;
+      return { id: f.id, name: key, displayName };
+    });
   }
   let rows = users.rows;
   if (q) {
