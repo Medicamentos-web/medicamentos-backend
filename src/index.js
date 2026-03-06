@@ -2779,57 +2779,60 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     : "";
   const content = `
     <style>
-      .users-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:24px; }
-      .users-header h1 { margin:0; font-size:24px; font-weight:700; }
-      .users-filters { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
-      .users-filters input, .users-filters select { padding:10px 14px; border:1px solid var(--border); border-radius:12px; font-size:14px; }
-      .users-filters input { min-width:220px; }
-      .users-table-wrap { margin-top:24px; border:1px solid var(--border); border-radius:12px; overflow:hidden; max-width:100%; }
-      .users-table { width:100%; border-collapse:collapse; font-size:13px; table-layout:fixed; }
-      .users-table th, .users-table td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); vertical-align:middle; word-break:break-word; }
-      .users-table th { background:var(--bg); font-weight:600; color:var(--muted); font-size:12px; }
+      .users-top { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px 20px; margin-bottom:12px; }
+      .users-header { display:flex; align-items:center; justify-content:space-between; flex:1; min-width:200px; gap:8px; }
+      .users-header h1 { margin:0; font-size:18px; font-weight:700; }
+      .users-filters { display:flex; gap:6px; flex-wrap:wrap; align-items:center; flex:1; min-width:280px; }
+      .users-filters input, .users-filters select { padding:5px 8px; border:1px solid var(--border); border-radius:6px; font-size:12px; }
+      .users-filters input { width:160px; min-width:140px; }
+      .users-filters select { min-width:100px; }
+      .users-filters .btn { padding:5px 10px; font-size:12px; }
+      .users-table-wrap { margin-top:8px; border:1px solid var(--border); border-radius:8px; overflow-x:auto; }
+      .users-table { width:100%; border-collapse:collapse; font-size:12px; }
+      .users-table th, .users-table td { padding:4px 6px; text-align:left; border-bottom:1px solid var(--border); vertical-align:middle; }
+      .users-table th { background:var(--bg); font-weight:600; color:var(--muted); font-size:11px; white-space:nowrap; }
       .users-table tr:last-child td { border-bottom:none; }
       .users-table tr:hover td { background:rgba(0,0,0,.02); }
-      .users-table .col-avatar { width:40px; }
-      .users-table .col-name { width:14%; }
-      .users-table .col-email { width:18%; }
-      .users-table .col-family { width:14%; }
-      .users-table .col-role { width:10%; }
-      .users-table .col-meds { width:6%; }
-      .users-table .col-hor { width:6%; }
-      .users-table .col-login { width:12%; }
-      .users-table .col-email-status { width:4%; text-align:center; }
-      .users-table .col-actions { width:18%; }
-      .user-avatar-sm { width:28px; height:28px; border-radius:6px; background:linear-gradient(135deg,#34d399,#06b6d4); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:12px; flex-shrink:0; }
-      .user-name-cell { font-weight:600; }
-      .user-email-cell { color:var(--muted); font-size:12px; }
-      .user-badge { font-size:10px; padding:3px 6px; border-radius:999px; font-weight:600; }
+      .users-table .col-avatar { width:28px; }
+      .users-table .col-name { min-width:90px; }
+      .users-table .col-email { min-width:120px; }
+      .users-table .col-family { min-width:80px; }
+      .users-table .col-role { width:1%; white-space:nowrap; }
+      .users-table .col-meds, .users-table .col-hor { width:28px; text-align:center; }
+      .users-table .col-login { min-width:85px; font-size:11px; }
+      .users-table .col-email-status { width:28px; text-align:center; }
+      .users-table .col-actions { width:1%; min-width:120px; white-space:nowrap; }
+      .user-avatar-sm { width:22px; height:22px; border-radius:4px; background:linear-gradient(135deg,#34d399,#06b6d4); display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:10px; flex-shrink:0; }
+      .user-name-cell { font-weight:600; font-size:12px; }
+      .user-email-cell { color:var(--muted); font-size:11px; }
+      .user-badge { font-size:10px; padding:2px 4px; border-radius:999px; font-weight:600; }
       .user-badge.role-admin { background:#DBEAFE; color:#1E3A8A; }
       .user-badge.role-user { background:#E7F7ED; color:#166534; }
       .user-badge.role-superuser { background:#FEF3C7; color:#92400E; }
       .user-badge.auth { background:#F1F5F9; color:#475569; }
-      .user-actions-cell { white-space:normal; }
-      .user-actions-cell .act-wrap { display:flex; flex-wrap:wrap; gap:4px; }
-      .user-actions-cell a, .user-actions-cell button { font-size:11px; padding:4px 8px; border-radius:6px; font-weight:600; text-decoration:none; display:inline-block; }
+      .user-actions-cell .act-wrap { display:inline-flex; flex-wrap:nowrap; gap:2px; align-items:center; }
+      .user-actions-cell a, .user-actions-cell button { font-size:11px; padding:2px 4px; border-radius:3px; font-weight:600; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; min-width:22px; height:22px; }
       .user-actions-cell .btn-edit { background:var(--accent); color:#fff; border:none; }
       .user-actions-cell .btn-outline { border:1px solid var(--border); color:var(--ink); background:#fff; }
       .user-actions-cell .btn-danger { background:#dc2626; color:#fff; border:none; }
       .user-actions-cell a:hover, .user-actions-cell button:hover { opacity:.9; }
       .user-actions-cell form { display:inline; margin:0; }
       .user-actions-cell button { cursor:pointer; font-family:inherit; }
-      .users-empty { text-align:center; padding:48px 24px; color:var(--muted); }
-      .users-empty p { margin:0 0 16px; font-size:16px; }
+      .users-empty { text-align:center; padding:24px 12px; color:var(--muted); }
+      .users-empty p { margin:0 0 10px; font-size:13px; }
+      .users-page.card { padding:10px 14px; }
     </style>
-    <div class="card">
+    <div class="card users-page">
       ${msgHtml}
-      <div class="users-header">
-        <h1>👤 Pacientes y usuarios</h1>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          ${isAdmin ? '<a class="btn outline" href="/admin/merge-users">🔀 Fusionar usuarios</a>' : ""}
-          <a class="btn primary" href="/admin/user-new">➕ Nuevo usuario</a>
+      <div class="users-top">
+        <div class="users-header">
+          <h1>👤 Pacientes y usuarios</h1>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            ${isAdmin ? '<a class="btn outline" href="/admin/merge-users">🔀 Fusionar</a>' : ""}
+            <a class="btn primary" href="/admin/user-new">➕ Nuevo</a>
+          </div>
         </div>
-      </div>
-      <form method="GET" action="/admin/users" class="users-filters">
+        <form method="GET" action="/admin/users" class="users-filters">
         <input name="q" type="search" placeholder="Buscar por nombre, email${isAdmin ? " o familia" : ""}..." value="${escapeHtml(q)}" />
         ${isAdmin && familiesForFilter.length ? `
         <select name="family_id">
@@ -2843,11 +2846,12 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
           <option value="superuser" ${roleFilter === "superuser" ? "selected" : ""}>Superuser</option>
         </select>
         <button type="submit" class="btn outline">🔎 Filtrar</button>
-      </form>
+        </form>
+      </div>
       ${
         rows.length === 0
           ? `
-      <div class="users-empty" style="margin-top:24px;">
+      <div class="users-empty" style="margin-top:16px;">
         <p>${q || roleFilter || familyFilter ? "No hay usuarios que coincidan con el filtro." : "Aún no hay usuarios. Añade el primero."}</p>
         ${!q && !roleFilter && !familyFilter ? '<a class="btn primary" href="/admin/user-new">➕ Crear primer usuario</a>' : '<a class="btn outline" href="/admin/users">Limpiar filtros</a>'}
       </div>`
@@ -2929,7 +2933,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
           </tbody>
         </table>
       </div>
-      <p class="muted" style="font-size:11px; margin-top:8px;">📧 <strong>✓</strong> = inició sesión (recibió credenciales) · <strong>✗</strong> = sin login · ✏️ Editar · 💊 Medicamentos · 📧 Reenviar email · 🔑 Crear contraseña · 🗑 Eliminar</p>`
+      <p class="muted" style="font-size:11px; margin-top:6px;">📧 <strong>✓</strong> = inició sesión (recibió credenciales) · <strong>✗</strong> = sin login · ✏️ Editar · 💊 Medicamentos · 📧 Reenviar email · 🔑 Crear contraseña · 🗑 Eliminar</p>`
       }
     </div>
   `;
