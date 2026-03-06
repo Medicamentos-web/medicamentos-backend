@@ -2742,8 +2742,20 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
   );
   let familiesForFilter = [];
   if (isAdmin) {
-    const famRes = await pool.query(`SELECT id, name FROM families ORDER BY name ASC`);
-    familiesForFilter = famRes.rows;
+    const famRes = await pool.query(
+      `SELECT id, name FROM families ORDER BY COALESCE(NULLIF(TRIM(name),''), 'Sin nombre'), id ASC`
+    );
+    const nameCount = {};
+    famRes.rows.forEach((f) => {
+      const n = (f.name || "").trim() || "Sin nombre";
+      nameCount[n] = (nameCount[n] || 0) + 1;
+    });
+    familiesForFilter = famRes.rows.map((f) => ({
+      ...f,
+      displayName: (nameCount[(f.name || "").trim() || "Sin nombre"] > 1)
+        ? `${(f.name || "Sin nombre").trim()} (#${f.id})`
+        : (f.name || `Familia ${f.id}`).trim(),
+    }));
   }
   let rows = users.rows;
   if (q) {
@@ -2839,7 +2851,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
         ${isAdmin && familiesForFilter.length ? `
         <select name="family_id">
           <option value="">Todas las familias</option>
-          ${familiesForFilter.map((f) => `<option value="${f.id}" ${familyFilter === String(f.id) ? "selected" : ""}>${escapeHtml(f.name || `Familia ${f.id}`)}</option>`).join("")}
+          ${familiesForFilter.map((f) => `<option value="${f.id}" ${familyFilter === String(f.id) ? "selected" : ""}>${escapeHtml(f.displayName || f.name || `Familia ${f.id}`)}</option>`).join("")}
         </select>` : ""}
         <select name="role">
           <option value="">Todos los roles</option>
