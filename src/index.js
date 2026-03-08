@@ -424,6 +424,21 @@ ensureAuthProviderColumn().catch((error) => {
   console.error("ERROR: No se pudo añadir auth_provider:", error.message);
 });
 
+async function ensureUserEmailsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_emails (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      email VARCHAR(255) NOT NULL,
+      PRIMARY KEY (user_id, email)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_emails_email ON user_emails(email)`);
+}
+
+ensureUserEmailsTable().catch((error) => {
+  console.error("ERROR: No se pudo crear user_emails:", error.message);
+});
+
 async function ensureDoctorTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS family_doctors (
@@ -1944,27 +1959,35 @@ app.post("/auth/login", async (req, res) => {
   }
 
   try {
-    // Si se envía family_id, usarlo. Si no, buscar por email (email es único por usuario).
-    const result = family_id
+    const cleanEmail = (email || "").trim().toLowerCase();
+    let result = family_id
       ? await pool.query(
-          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password, auth_provider
-           FROM users WHERE family_id = $1 AND email = $2`,
-          [Number(family_id), email]
+          `SELECT u.id, u.family_id, u.name, u.first_name, u.last_name, u.email, u.role, u.password_hash, u.must_change_password, u.auth_provider
+           FROM users u WHERE u.family_id = $1 AND u.email = $2`,
+          [Number(family_id), cleanEmail]
         )
       : await pool.query(
-          `SELECT id, family_id, name, first_name, last_name, email, role, password_hash, must_change_password, auth_provider
-           FROM users WHERE email = $1`,
-          [email]
+          `SELECT u.id, u.family_id, u.name, u.first_name, u.last_name, u.email, u.role, u.password_hash, u.must_change_password, u.auth_provider
+           FROM users u WHERE u.email = $1`,
+          [cleanEmail]
         );
+    if (result.rows.length === 0) {
+      result = await pool.query(
+        `SELECT u.id, u.family_id, u.name, u.first_name, u.last_name, u.email, u.role, u.password_hash, u.must_change_password, u.auth_provider
+         FROM users u JOIN user_emails ue ON ue.user_id = u.id WHERE ue.email = $1
+         ${family_id ? "AND u.family_id = $2" : ""} LIMIT 1`,
+        family_id ? [cleanEmail, Number(family_id)] : [cleanEmail]
+      );
+    }
     if (result.rows.length === 0) {
       return res.status(401).json({ error: "credenciales inválidas" });
     }
 
     const user = result.rows[0];
-    // Si el usuario se registró con Google/Facebook, no tiene contraseña válida
-    if (user.auth_provider && user.auth_provider !== "email") {
+    const providers = (user.auth_provider || "email").split(",").map((p) => p.trim());
+    if (!providers.includes("email")) {
       return res.status(401).json({
-        error: `Esta cuenta usa inicio de sesión con ${user.auth_provider === "google" ? "Google" : "Facebook"}. Usa el botón correspondiente en lugar de email/contraseña.`,
+        error: `Esta cuenta usa inicio de sesión con ${providers.includes("google") ? "Google" : "Facebook"}. Usa el botón correspondiente en lugar de email/contraseña.`,
       });
     }
     const ok = await bcrypt.compare(password, user.password_hash);
@@ -2007,6 +2030,12 @@ app.post("/auth/logout", (_req, res) => {
 // =============================================================================
 // OAUTH — Google, Facebook (Sign in with Apple requiere configuración adicional)
 // =============================================================================
+function addAuthProvider(current, provider) {
+  const set = new Set((current || "email").split(",").map((p) => p.trim()).filter(Boolean));
+  set.add(provider);
+  return [...set].join(",");
+}
+
 async function findOrCreateOAuthUser(profile, provider) {
   const email = (profile.emails && profile.emails[0]?.value) || profile.email;
   if (!email || !email.includes("@")) return null;
@@ -2014,16 +2043,27 @@ async function findOrCreateOAuthUser(profile, provider) {
   const cleanEmail = email.trim().toLowerCase();
   const name = profile.displayName || profile.name?.givenName || profile.name?.familyName || cleanEmail.split("@")[0];
 
-  const existing = await pool.query(
-    `SELECT id, family_id, name, email, role FROM users WHERE email = $1 ORDER BY id ASC LIMIT 1`,
+  let user = null;
+  const byMainEmail = await pool.query(
+    `SELECT id, family_id, name, email, role, auth_provider FROM users WHERE email = $1 ORDER BY id ASC LIMIT 1`,
     [cleanEmail]
   );
+  if (byMainEmail.rows.length > 0) user = byMainEmail.rows[0];
 
-  if (existing.rows.length > 0) {
-    const user = existing.rows[0];
+  if (!user) {
+    const byLinkedEmail = await pool.query(
+      `SELECT u.id, u.family_id, u.name, u.email, u.role, u.auth_provider FROM users u
+       JOIN user_emails ue ON ue.user_id = u.id WHERE ue.email = $1 LIMIT 1`,
+      [cleanEmail]
+    );
+    if (byLinkedEmail.rows.length > 0) user = byLinkedEmail.rows[0];
+  }
+
+  if (user) {
+    const newProvider = addAuthProvider(user.auth_provider, provider);
     await pool.query(
       `UPDATE users SET auth_provider = $1, last_login = NOW(), last_ip = $2 WHERE id = $3`,
-      [provider, null, user.id]
+      [newProvider, null, user.id]
     );
     return user;
   }
@@ -3028,8 +3068,8 @@ app.get("/admin/show-password/:id", requireRoleHtml(["admin", "superuser"]), asy
   try {
     const user = await pool.query(
       isAdmin
-        ? `SELECT id, name, email, family_id FROM users WHERE id = $1`
-        : `SELECT id, name, email, family_id FROM users WHERE id = $1 AND family_id = $2`,
+        ? `SELECT id, name, email, family_id, auth_provider FROM users WHERE id = $1`
+        : `SELECT id, name, email, family_id, auth_provider FROM users WHERE id = $1 AND family_id = $2`,
       isAdmin ? [id] : [id, familyId]
     );
     if (user.rows.length === 0) return res.redirect("/admin/users?msg=not_found");
@@ -3037,8 +3077,8 @@ app.get("/admin/show-password/:id", requireRoleHtml(["admin", "superuser"]), asy
     const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
     const hashed = await bcrypt.hash(tempPassword, 10);
     await pool.query(
-      `UPDATE users SET password_hash = $1, must_change_password = true, auth_provider = 'email' WHERE id = $2`,
-      [hashed, id]
+      `UPDATE users SET password_hash = $1, must_change_password = true, auth_provider = $2 WHERE id = $3`,
+      [hashed, addAuthProvider(u.auth_provider, "email"), id]
     );
     const content = `
       <div class="card" style="max-width:480px;">
@@ -3080,8 +3120,8 @@ app.post("/admin/force-email-password/:id", requireRoleHtml(["admin", "superuser
     const tempPassword = Math.random().toString(36).slice(-8) + "A1!";
     const hashed = await bcrypt.hash(tempPassword, 10);
     await pool.query(
-      `UPDATE users SET password_hash = $1, must_change_password = true, auth_provider = 'email' WHERE id = $2`,
-      [hashed, id]
+      `UPDATE users SET password_hash = $1, must_change_password = true, auth_provider = $2 WHERE id = $3`,
+      [hashed, addAuthProvider(u.auth_provider, "email"), id]
     );
     const result = await sendWelcomeEmailToUser(u.name, u.email, u.family_id, tempPassword, "de-CH");
     const sent = result?.ok === true;
@@ -3143,8 +3183,8 @@ app.post("/admin/merge-users", requireRoleHtml(["admin"]), async (req, res) => {
   }
   try {
     const [fromUser, toUser] = await Promise.all([
-      pool.query(`SELECT id, name, email, family_id FROM users WHERE id = $1`, [fromId]),
-      pool.query(`SELECT id, name, email, family_id FROM users WHERE id = $1`, [toId]),
+      pool.query(`SELECT id, name, email, family_id, auth_provider, password_hash FROM users WHERE id = $1`, [fromId]),
+      pool.query(`SELECT id, name, email, family_id, auth_provider, password_hash FROM users WHERE id = $1`, [toId]),
     ]);
     if (fromUser.rows.length === 0 || toUser.rows.length === 0) {
       return res.redirect("/admin/merge-users?msg=not_found");
@@ -3153,6 +3193,11 @@ app.post("/admin/merge-users", requireRoleHtml(["admin"]), async (req, res) => {
     const tgt = toUser.rows[0];
     const srcFam = src.family_id;
     const tgtFam = tgt.family_id;
+
+    if (!srcFam || !tgtFam) {
+      console.error("[ADMIN MERGE] Usuario sin familia:", { fromId: srcFam == null, toId: tgtFam == null });
+      return res.redirect("/admin/merge-users?msg=error");
+    }
 
     await pool.query("BEGIN");
 
@@ -3186,6 +3231,45 @@ app.post("/admin/merge-users", requireRoleHtml(["admin"]), async (req, res) => {
       );
     }
 
+    const srcEmailClean = (src.email || "").trim().toLowerCase();
+    if (srcEmailClean && srcEmailClean !== (tgt.email || "").trim().toLowerCase()) {
+      try {
+        await pool.query(
+          `INSERT INTO user_emails (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id, email) DO NOTHING`,
+          [toId, srcEmailClean]
+        );
+      } catch (ueErr) {
+        console.warn("[ADMIN MERGE] user_emails insert falló (tabla puede no existir):", ueErr.message);
+      }
+    }
+
+    // Copiar médico de cabecera del origen al destino si el destino no tiene
+    try {
+      const srcDoctors = await pool.query(`SELECT first_name, last_name, email, phone, street, house_number, postal_code, city FROM doctors WHERE user_id = $1 AND family_id = $2`, [fromId, srcFam]);
+      const tgtHasDoctor = await pool.query(`SELECT 1 FROM doctors WHERE user_id = $1 AND family_id = $2 LIMIT 1`, [toId, tgtFam]);
+      if (srcDoctors.rows.length > 0 && tgtHasDoctor.rows.length === 0) {
+        const d = srcDoctors.rows[0];
+        await pool.query(
+          `INSERT INTO doctors (family_id, user_id, first_name, last_name, email, phone, street, house_number, postal_code, city)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (family_id, user_id) DO NOTHING`,
+          [tgtFam, toId, d.first_name, d.last_name, d.email, d.phone, d.street, d.house_number, d.postal_code, d.city]
+        );
+      }
+    } catch (docErr) {
+      console.warn("[ADMIN MERGE] doctors copy falló:", docErr.message);
+    }
+
+    // Unir auth_provider para que pueda entrar con email y/o Google
+    const mergedProvider = addAuthProvider(tgt.auth_provider, (src.auth_provider || "email").split(",")[0]);
+    const srcHasRealPassword = src.password_hash && !String(src.password_hash).includes("oauth_no_password_");
+    const tgtHasRealPassword = tgt.password_hash && !String(tgt.password_hash).includes("oauth_no_password_");
+    const passToUse = srcHasRealPassword && !tgtHasRealPassword ? src.password_hash : tgt.password_hash;
+    await pool.query(
+      `UPDATE users SET auth_provider = $1, password_hash = $2 WHERE id = $3`,
+      [mergedProvider, passToUse, toId]
+    );
+
     await pool.query(`DELETE FROM users WHERE id = $1`, [fromId]);
     const remainingInFamily = await pool.query(`SELECT COUNT(*) AS c FROM users WHERE family_id = $1`, [srcFam]);
     if (Number(remainingInFamily.rows[0]?.c || 0) === 0) {
@@ -3198,7 +3282,8 @@ app.post("/admin/merge-users", requireRoleHtml(["admin"]), async (req, res) => {
     res.redirect("/admin/users?msg=merge_ok");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
-    console.error("[ADMIN MERGE]", err.message);
+    console.error("[ADMIN MERGE]", err.message, "code:", err.code, "detail:", err.detail);
+    if (err.stack) console.error("[ADMIN MERGE] stack:", err.stack);
     res.redirect("/admin/merge-users?msg=error");
   }
 });
@@ -3416,6 +3501,7 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
     [userFamilyId, id]
   );
   const doctor = doctorResult.rows[0] || {};
+  const linkedEmails = await pool.query(`SELECT email FROM user_emails WHERE user_id = $1`, [id]);
   const fieldClass = 'class="form-control"';
   const content = `
     <div class="card" style="max-width:640px; margin:0 auto;">
@@ -3458,6 +3544,14 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
           <option value="admin" ${user.role === "admin" ? "selected" : ""}>admin</option>
           <option value="superuser" ${user.role === "superuser" ? "selected" : ""}>superuser</option>
         </select>
+        <h2 style="margin-top:18px; font-size:14px;">Emails vinculados (Google/Facebook)</h2>
+        <p class="muted" style="font-size:12px; margin-bottom:8px;">Emails alternativos para iniciar sesión (ej. gmail si el principal es corporativo). Tras fusionar usuarios, el email del origen queda aquí.</p>
+        ${linkedEmails.rows.length ? `<ul style="font-size:13px; margin:0 0 8px;">${linkedEmails.rows.map((r) => `<li>${escapeHtml(r.email)} <form method="POST" action="/admin/user-unlink-email" style="display:inline;"><input type="hidden" name="user_id" value="${user.id}" /><input type="hidden" name="email" value="${escapeHtml(r.email)}" /><button type="submit" class="btn outline" style="padding:2px 6px; font-size:11px;">Quitar</button></form></li>`).join("")}</ul>` : '<p style="font-size:12px; color:var(--muted); margin:0 0 8px;">Ninguno</p>'}
+        <form method="POST" action="/admin/user-link-email" style="display:flex; gap:8px; align-items:center;">
+          <input type="hidden" name="user_id" value="${user.id}" />
+          <input name="email" type="email" placeholder="Añadir email (ej. gmail para login con Google)" ${fieldClass} style="flex:1; max-width:280px;" />
+          <button type="submit" class="btn outline">Vincular</button>
+        </form>
         <h2 style="margin-top:18px; font-size:14px;">Médico de cabecera</h2>
         <label>Nombre</label>
         <input name="doctor_first_name" value="${escapeHtml(doctor.first_name || "")}" ${fieldClass} />
@@ -3483,6 +3577,52 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
     </div>
   `;
   res.send(renderShell(req, "Editar usuario", "patients", content));
+});
+
+app.post("/admin/user-link-email", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  const userId = Number(req.body?.user_id);
+  const email = (req.body?.email || "").trim().toLowerCase();
+  if (!userId || !email || !email.includes("@")) {
+    return res.redirect("/admin/user-edit/" + (userId || "") + "?msg=invalid");
+  }
+  try {
+    const u = await pool.query(
+      isAdmin ? `SELECT id FROM users WHERE id = $1` : `SELECT id FROM users WHERE id = $1 AND family_id = $2`,
+      isAdmin ? [userId] : [userId, familyId]
+    );
+    if (u.rows.length === 0) return res.redirect("/admin/users");
+    const main = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
+    if (main.rows[0]?.email === email) return res.redirect("/admin/user-edit/" + userId + "?msg=email_is_main");
+    await pool.query(
+      `INSERT INTO user_emails (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id, email) DO NOTHING`,
+      [userId, email]
+    );
+    res.redirect("/admin/user-edit/" + userId + "?msg=linked");
+  } catch (e) {
+    console.error("[LINK EMAIL]", e.message);
+    res.redirect("/admin/user-edit/" + userId + "?msg=error");
+  }
+});
+
+app.post("/admin/user-unlink-email", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  const userId = Number(req.body?.user_id);
+  const email = (req.body?.email || "").trim().toLowerCase();
+  if (!userId || !email) return res.redirect("/admin/users");
+  try {
+    const u = await pool.query(
+      isAdmin ? `SELECT id FROM users WHERE id = $1` : `SELECT id FROM users WHERE id = $1 AND family_id = $2`,
+      isAdmin ? [userId] : [userId, familyId]
+    );
+    if (u.rows.length === 0) return res.redirect("/admin/users");
+    await pool.query(`DELETE FROM user_emails WHERE user_id = $1 AND email = $2`, [userId, email]);
+    res.redirect("/admin/user-edit/" + userId + "?msg=unlinked");
+  } catch (e) {
+    res.redirect("/admin/user-edit/" + userId + "?msg=error");
+  }
 });
 
 app.post("/admin/user-save", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
