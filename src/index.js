@@ -565,10 +565,12 @@ async function ensurePushTables() {
       endpoint TEXT NOT NULL,
       p256dh TEXT NOT NULL,
       auth TEXT NOT NULL,
+      lang VARCHAR(10) DEFAULT 'es',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (user_id, endpoint)
     );
   `);
+  await pool.query(`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS lang VARCHAR(10) DEFAULT 'es'`);
 }
 
 ensurePushTables().catch((error) => {
@@ -895,13 +897,60 @@ async function sendPushToFamily(familyId, payload) {
   }
 }
 
+const PUSH_STRINGS = {
+  es: {
+    reminder_title: "Recordatorio de medicación",
+    reminder_body: (med, time) => `Toma pendiente: ${med} a las ${time}`,
+    pending_title: "Tomas pendientes",
+    pending_body: (n) => `Te faltan ${n} toma(s) hoy.`,
+    test_title: "MediControl Test",
+    test_body: "Las notificaciones push funcionan correctamente.",
+  },
+  "de-CH": {
+    reminder_title: "Medikamenten-Erinnerung",
+    reminder_body: (med, time) => `Ausstehende Einnahme: ${med} um ${time}`,
+    pending_title: "Ausstehende Einnahmen",
+    pending_body: (n) => `Du hast heute noch ${n} Einnahme(n) ausstehend.`,
+    test_title: "MediControl Test",
+    test_body: "Push-Benachrichtigungen funktionieren einwandfrei.",
+  },
+  en: {
+    reminder_title: "Medication reminder",
+    reminder_body: (med, time) => `Pending dose: ${med} at ${time}`,
+    pending_title: "Pending doses",
+    pending_body: (n) => `You have ${n} dose(s) remaining today.`,
+    test_title: "MediControl Test",
+    test_body: "Push notifications are working correctly.",
+  },
+};
+
+function getPushPayload(type, lang, params = {}) {
+  const l = PUSH_STRINGS[lang] || PUSH_STRINGS.es;
+  switch (type) {
+    case "reminder":
+      return { title: l.reminder_title, body: l.reminder_body(params.med || "", params.time || "") };
+    case "pending":
+      return { title: l.pending_title, body: l.pending_body(params.count || 0) };
+    case "test":
+      return { title: l.test_title, body: l.test_body };
+    default:
+      return { title: params.title || "MediControl", body: params.body || "" };
+  }
+}
+
+async function getUserPushLang(userId) {
+  const r = await pool.query(`SELECT lang FROM push_subscriptions WHERE user_id = $1 LIMIT 1`, [userId]);
+  const lang = r.rows[0]?.lang;
+  return ["es", "de-CH", "en"].includes(lang) ? lang : "es";
+}
+
 async function sendPushToUser(userId, payload) {
   if (!pushKeys) {
     console.warn("[PUSH] VAPID keys not yet initialized, skipping push");
     return 0;
   }
   const subs = await pool.query(
-    `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1`,
+    `SELECT id, endpoint, p256dh, auth, lang FROM push_subscriptions WHERE user_id = $1`,
     [userId]
   );
   if (subs.rows.length === 0) {
@@ -911,9 +960,16 @@ async function sendPushToUser(userId, payload) {
   let sent = 0;
   for (const sub of subs.rows) {
     try {
+      let p;
+      if (typeof payload === "object" && payload._type) {
+        p = getPushPayload(payload._type, sub.lang || "es", payload);
+        if (payload.tag) p.tag = payload.tag;
+      } else {
+        p = payload;
+      }
       await webpush.sendNotification(
         { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-        JSON.stringify(payload)
+        JSON.stringify(p)
       );
       sent++;
       console.log(`[PUSH] Sent to user ${userId} (sub ${sub.id})`);
@@ -5233,14 +5289,14 @@ app.post("/api/push/subscribe", requireAuth, async (req, res) => {
   if (!familyId || !sub.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) {
     return res.status(400).json({ error: "subscription inválida" });
   }
-  // Remove old subscriptions for this user, keep only the fresh one
+  const lang = ["es", "de-CH", "en"].includes(sub.lang) ? sub.lang : "es";
   await pool.query(`DELETE FROM push_subscriptions WHERE user_id = $1`, [userId]);
   await pool.query(
-    `INSERT INTO push_subscriptions (user_id, family_id, endpoint, p256dh, auth)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [userId, familyId, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+    `INSERT INTO push_subscriptions (user_id, family_id, endpoint, p256dh, auth, lang)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [userId, familyId, sub.endpoint, sub.keys.p256dh, sub.keys.auth, lang]
   );
-  console.log(`[PUSH] Fresh subscription saved for user ${userId}, endpoint ${sub.endpoint.slice(0, 60)}...`);
+  console.log(`[PUSH] Fresh subscription saved for user ${userId}, lang ${lang}`);
   res.json({ ok: true });
 });
 
@@ -5255,8 +5311,7 @@ app.post("/api/push/test", requireAuth, async (req, res) => {
       return res.json({ ok: false, error: "no_subscriptions", message: "No hay suscripciones push registradas para tu usuario. Pulsa la campana para activar notificaciones." });
     }
     const sent = await sendPushToUser(userId, {
-      title: "MediControl Test",
-      body: "Las notificaciones push funcionan correctamente.",
+      _type: "test",
       tag: "test-" + Date.now(),
     });
     res.json({ ok: true, subscriptions: subs.rows.length, sent });
@@ -7114,8 +7169,8 @@ app.post("/api/daily-checkout", requireAuth, async (req, res) => {
     const takenCount = Number(taken.rows[0].count || 0);
     if (takenCount < total) {
       await sendPushToUser(userId, {
-        title: "Tomas pendientes",
-        body: `Te faltan ${total - takenCount} toma(s) hoy.`,
+        _type: "pending",
+        count: total - takenCount,
       });
       return res.json({ ok: false, message: "Plan incompleto" });
     }
@@ -7272,8 +7327,9 @@ async function generateDoseAlerts(familyId) {
       ]
     );
     const pushSent = await sendPushToUser(row.user_id, {
-      title: "Recordatorio de medicación",
-      body: `Toma pendiente: ${row.med_name} a las ${row.dose_time}`,
+      _type: "reminder",
+      med: row.med_name || "",
+      time: row.dose_time || "",
     });
     console.log(`[ALERTS] Created alert for user ${row.user_id}: ${row.med_name} @ ${row.dose_time} (push sent: ${pushSent})`);
     created += 1;
