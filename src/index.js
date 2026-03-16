@@ -5290,13 +5290,18 @@ app.post("/api/push/subscribe", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "subscription inválida" });
   }
   const lang = ["es", "de-CH", "en"].includes(sub.lang) ? sub.lang : "es";
-  await pool.query(`DELETE FROM push_subscriptions WHERE user_id = $1`, [userId]);
+  // Upsert: cada dispositivo (endpoint único) tiene su propia suscripción. No borrar las demás.
   await pool.query(
     `INSERT INTO push_subscriptions (user_id, family_id, endpoint, p256dh, auth, lang)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, endpoint) DO UPDATE SET
+       p256dh = EXCLUDED.p256dh,
+       auth = EXCLUDED.auth,
+       lang = EXCLUDED.lang,
+       family_id = EXCLUDED.family_id`,
     [userId, familyId, sub.endpoint, sub.keys.p256dh, sub.keys.auth, lang]
   );
-  console.log(`[PUSH] Fresh subscription saved for user ${userId}, lang ${lang}`);
+  console.log(`[PUSH] Subscription saved for user ${userId}, lang ${lang} (multi-device)`);
   res.json({ ok: true });
 });
 
