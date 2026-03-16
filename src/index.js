@@ -8177,13 +8177,20 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
         </a>
       </div>
 
-      <div class="section-title">📱 App móvil</div>
+      <div class="section-title">📱 App móvil y tiendas</div>
       <div class="link-grid">
-        <a class="link-card" href="https://medicamentos-frontend.vercel.app/promo" target="_blank">
-          <div class="link-icon" style="background:#7c3aed; color:#fff;">🎬</div>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app" target="_blank">
+          <div class="link-icon" style="background:#10b981; color:#fff;">📱</div>
           <div class="link-meta">
-            <h3>Video Promo</h3>
-            <p>Página de grabación de pantalla</p>
+            <h3>App Web</h3>
+            <p>medicamentos-frontend.vercel.app</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app/care" target="_blank">
+          <div class="link-icon" style="background:#0ea5e9; color:#fff;">❤️</div>
+          <div class="link-meta">
+            <h3>Care / Cuidados</h3>
+            <p>Landing de cuidados · Trial</p>
           </div>
         </a>
         <a class="link-card" href="https://medicamentos-frontend.vercel.app/billing" target="_blank">
@@ -8191,6 +8198,27 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
           <div class="link-meta">
             <h3>Planes y precios</h3>
             <p>Vista del usuario de suscripciones</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://medicamentos-frontend.vercel.app/promo" target="_blank">
+          <div class="link-icon" style="background:#7c3aed; color:#fff;">🎬</div>
+          <div class="link-meta">
+            <h3>Video Promo</h3>
+            <p>Página de grabación de pantalla</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://play.google.com/store/apps/details?id=com.medicontrol.app" target="_blank">
+          <div class="link-icon" style="background:#34a853; color:#fff;">▶</div>
+          <div class="link-meta">
+            <h3>Google Play</h3>
+            <p>MediControl · Android</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://apps.apple.com/app/medicontrol/idXXXXXXXXX" target="_blank" style="opacity:0.8;">
+          <div class="link-icon" style="background:#000; color:#fff;">🍎</div>
+          <div class="link-meta">
+            <h3>App Store</h3>
+            <p>MediControl · iOS (reemplaza id cuando publiques)</p>
           </div>
         </a>
       </div>
