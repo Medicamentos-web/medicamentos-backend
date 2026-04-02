@@ -15,7 +15,7 @@ const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
-const FacebookStrategy = require("passport-facebook").Strategy;
+const AppleStrategy = require("passport-apple");
 const pg = require("pg");
 const { Pool } = pg;
 // Fix: devolver DATE (oid 1082) como string "YYYY-MM-DD" en vez de objeto Date
@@ -33,11 +33,13 @@ const STRIPE_PRICE_ID_YEARLY = process.env.STRIPE_PRICE_ID_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
-// OAuth config (Google, Facebook) — solo activo si están configuradas las credenciales
+// OAuth config — solo activo si están configuradas las credenciales
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
-const FACEBOOK_APP_ID = process.env.FACEBOOK_APP_ID || "";
-const FACEBOOK_APP_SECRET = process.env.FACEBOOK_APP_SECRET || "";
+const APPLE_SERVICE_ID = process.env.APPLE_SERVICE_ID || "";
+const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID || "";
+const APPLE_KEY_ID = process.env.APPLE_KEY_ID || "";
+const APPLE_PRIVATE_KEY = (process.env.APPLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
 // Stripe webhook necesita raw body - ANTES de express.json()
 app.post("/api/billing/webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -2036,10 +2038,10 @@ app.post("/auth/login", async (req, res) => {
     }
 
     const user = result.rows[0];
-    // Si el usuario se registró con Google/Facebook, no tiene contraseña válida
+    // Si el usuario se registró con Google/Apple/etc., no tiene contraseña válida
     if (user.auth_provider && user.auth_provider !== "email") {
       return res.status(401).json({
-        error: `Esta cuenta usa inicio de sesión con ${user.auth_provider === "google" ? "Google" : "Facebook"}. Usa el botón correspondiente en lugar de email/contraseña.`,
+        error: `Esta cuenta usa inicio de sesión con ${oauthProviderLabel(user.auth_provider)}. Usa el botón correspondiente en lugar de email/contraseña.`,
       });
     }
     const ok = await bcrypt.compare(password, user.password_hash);
@@ -2080,8 +2082,15 @@ app.post("/auth/logout", (_req, res) => {
 });
 
 // =============================================================================
-// OAUTH — Google, Facebook (Sign in with Apple requiere configuración adicional)
+// OAUTH — Google, Sign in with Apple (variables APPLE_* en Render)
 // =============================================================================
+function oauthProviderLabel(p) {
+  if (p === "google") return "Google";
+  if (p === "apple") return "Apple";
+  if (p === "facebook") return "Facebook";
+  return p ? String(p) : "OAuth";
+}
+
 async function findOrCreateOAuthUser(profile, provider) {
   const email = (profile.emails && profile.emails[0]?.value) || profile.email;
   if (!email || !email.includes("@")) return null;
@@ -2159,29 +2168,48 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
   console.log("[OAUTH] Google configurado");
 }
 
-if (FACEBOOK_APP_ID && FACEBOOK_APP_SECRET) {
+if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
   passport.use(
-    new FacebookStrategy(
+    new AppleStrategy(
       {
-        clientID: FACEBOOK_APP_ID,
-        clientSecret: FACEBOOK_APP_SECRET,
-        callbackURL: process.env.FACEBOOK_CALLBACK_URL || `${process.env.BACKEND_PUBLIC_URL || "http://localhost:4000"}/auth/facebook/callback`,
-        profileFields: ["id", "displayName", "emails"],
+        clientID: APPLE_SERVICE_ID,
+        teamID: APPLE_TEAM_ID,
+        keyID: APPLE_KEY_ID,
+        privateKeyString: APPLE_PRIVATE_KEY,
+        callbackURL:
+          process.env.APPLE_CALLBACK_URL ||
+          `${process.env.BACKEND_PUBLIC_URL || "http://localhost:4000"}/auth/apple/callback`,
+        passReqToCallback: true,
       },
-      async (_accessToken, _refreshToken, profile, done) => {
+      async (req, _accessToken, _refreshToken, idToken, _profile, done) => {
         try {
-          const user = await findOrCreateOAuthUser(profile, "facebook");
-          done(null, user);
+          const payload = jwt.decode(idToken);
+          if (!payload?.sub) return done(null, false);
+          const email = payload.email;
+          if (!email || !String(email).includes("@")) {
+            return done(new Error("Apple no devolvió email. Usa otra cuenta o permite el email."), null);
+          }
+          let displayName = String(email).split("@")[0];
+          if (req.appleProfile && req.appleProfile.name) {
+            const n = req.appleProfile.name;
+            displayName = [n.firstName, n.lastName].filter(Boolean).join(" ").trim() || displayName;
+          }
+          const syntheticProfile = {
+            emails: [{ value: String(email).trim().toLowerCase() }],
+            displayName,
+          };
+          const user = await findOrCreateOAuthUser(syntheticProfile, "apple");
+          done(null, user || false);
         } catch (err) {
           done(err, null);
         }
       }
     )
   );
-  app.get("/auth/facebook", passport.authenticate("facebook", { scope: ["email"] }));
-  app.get(
-    "/auth/facebook/callback",
-    passport.authenticate("facebook", { session: false }),
+  app.get("/auth/apple", passport.authenticate("apple"));
+  app.post(
+    "/auth/apple/callback",
+    passport.authenticate("apple", { session: false }),
     (req, res) => {
       const user = req.user;
       if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
@@ -2191,7 +2219,7 @@ if (FACEBOOK_APP_ID && FACEBOOK_APP_SECRET) {
       res.redirect(FRONTEND_URL + sep + "oauth=ok&token=" + encodeURIComponent(token));
     }
   );
-  console.log("[OAUTH] Facebook configurado");
+  console.log("[OAUTH] Sign in with Apple configurado");
 }
 
 // Diagnóstico: comprobar si un email existe y cómo debe iniciar sesión (sin auth)
@@ -2216,7 +2244,7 @@ app.get("/api/check-email", async (req, res) => {
       auth_provider: provider,
       hint: provider === "email"
         ? "Usa email + contraseña. Si no recuerdas: Olvidé mi contraseña. Si no tienes Family ID, déjalo vacío."
-        : `Esta cuenta usa ${provider === "google" ? "Google" : "Facebook"}. Usa el botón correspondiente en lugar de email/contraseña.`,
+        : `Esta cuenta usa ${oauthProviderLabel(provider)}. Usa el botón correspondiente en lugar de email/contraseña.`,
     });
   } catch (err) {
     console.error("[CHECK-EMAIL]", err.message);
@@ -5228,6 +5256,59 @@ app.get("/api/drug-interactions", requireAuth, async (req, res) => {
   }
 });
 
+// Orientación general de bienestar (IA) — educativo; no diagnóstico ni prescripción
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+
+app.post("/api/wellness-ai", requireAuth, async (req, res) => {
+  const raw = (req.body?.message || "").trim();
+  if (!raw || raw.length > 2000) {
+    return res.status(400).json({ error: "Mensaje vacío o demasiado largo" });
+  }
+  if (!OPENAI_API_KEY) {
+    return res.status(503).json({ error: "servicio_no_configurado" });
+  }
+  const system = `Eres un asistente de educación para el bienestar en MediControl (app de recordatorios de medicación).
+REGLAS ESTRICTAS:
+- No diagnostiques enfermedades ni actúes como consulta médica.
+- No recomiendes medicamentos concretos, dosis ni marcas. No inventes fármacos.
+- Si el usuario pregunta "qué debo tomar", explica que solo un médico o farmacéutico puede indicar medicación según su historial, alergias y medicación actual.
+- Ofrece orientación general: autocuidado (descanso, hidratación, señales de alarma) y cuándo acudir a urgencias o llamar al número local de emergencias.
+- Ante dolor de cabeza muy intenso y repentino, mareo con confusión, dolor torácico, falta de aire, debilidad súbita o síntomas sugestivos de ictus: indica buscar ayuda urgente de inmediato.
+- Responde en el mismo idioma que el usuario (español, alemán suizo o inglés).
+- Sé breve: listas cortas y párrafos de 2–4 frases.`;
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0.35,
+        max_tokens: 700,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: raw },
+        ],
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      console.error("[wellness-ai]", data?.error?.message || r.status);
+      return res.status(502).json({ error: "No se pudo generar la respuesta" });
+    }
+    const text = data?.choices?.[0]?.message?.content?.trim();
+    if (!text) {
+      return res.status(502).json({ error: "Respuesta vacía" });
+    }
+    res.json({ reply: text });
+  } catch (e) {
+    console.error("[wellness-ai]", e.message);
+    res.status(500).json({ error: "Error al contactar el servicio" });
+  }
+});
+
 // =============================================================================
 // PDF CRÍTICOS
 // =============================================================================
@@ -8074,6 +8155,233 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
           <div class="link-meta">
             <h3>Google Cloud</h3>
             <p>OAuth · Credenciales · Proyecto MediControl</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title">📚 Soporte oficial (por proveedor)</div>
+      <p class="muted" style="font-size:12px; margin:8px 0 4px;">Ayuda y documentación de cada plataforma. Orden: Apple → Google → email, pagos, hosting, CI y app híbrida.</p>
+
+      <div class="section-title" style="margin-top:16px;">🍎 Apple</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://appstoreconnect.apple.com" target="_blank">
+          <div class="link-icon" style="background:#000; color:#fff;">⌁</div>
+          <div class="link-meta">
+            <h3>App Store Connect</h3>
+            <p>Apps, builds, TestFlight, metadatos, revisión</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://help.apple.com/app-store-connect/" target="_blank">
+          <div class="link-icon" style="background:#0071e3; color:#fff;">?</div>
+          <div class="link-meta">
+            <h3>App Store Connect — Ayuda</h3>
+            <p>Guías oficiales de uso de Connect</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.apple.com" target="_blank">
+          <div class="link-icon" style="background:#1d1d1f; color:#fff;"></div>
+          <div class="link-meta">
+            <h3>Apple Developer</h3>
+            <p>Cuenta, certificados, identificadores, perfiles</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.apple.com/programs/enroll" target="_blank">
+          <div class="link-icon" style="background:#555; color:#fff;">✎</div>
+          <div class="link-meta">
+            <h3>Apple Developer Program</h3>
+            <p>Alta en el programa (99 USD/año)</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.apple.com/testflight/" target="_blank">
+          <div class="link-icon" style="background:#5856d6; color:#fff;">✈</div>
+          <div class="link-meta">
+            <h3>TestFlight</h3>
+            <p>Betas internas y externas</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.apple.com/app-store/review/guidelines/" target="_blank">
+          <div class="link-icon" style="background:#bf4800; color:#fff;">§</div>
+          <div class="link-meta">
+            <h3>App Review Guidelines</h3>
+            <p>Normas de revisión App Store</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.apple.com/app-store/user-privacy-and-data-use/" target="_blank">
+          <div class="link-icon" style="background:#34c759; color:#fff;">🔒</div>
+          <div class="link-meta">
+            <h3>Privacidad en App Store</h3>
+            <p>Etiquetas de privacidad y datos</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.apple.com/in-app-purchase/" target="_blank">
+          <div class="link-icon" style="background:#ff9500; color:#fff;">💳</div>
+          <div class="link-meta">
+            <h3>In-App Purchase</h3>
+            <p>Compras dentro de la app (Apple)</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.apple.com/documentation/xcode/distributing-your-app-for-beta-testing-and-releases" target="_blank">
+          <div class="link-icon" style="background:#0a84ff; color:#fff;">📦</div>
+          <div class="link-meta">
+            <h3>Distribución con Xcode</h3>
+            <p>Betas y publicación (documentación)</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title" style="margin-top:16px;">▶ Google</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://play.google.com/console" target="_blank">
+          <div class="link-icon" style="background:#34a853; color:#fff;">▶</div>
+          <div class="link-meta">
+            <h3>Google Play Console</h3>
+            <p>Publicación, pruebas internas/cerradas, producción</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://support.google.com/googleplay/android-developer" target="_blank">
+          <div class="link-icon" style="background:#4285f4; color:#fff;">?</div>
+          <div class="link-meta">
+            <h3>Play Console — Centro de ayuda</h3>
+            <p>Artículos oficiales para desarrolladores</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://support.google.com/googleplay/android-developer/answer/9859152" target="_blank">
+          <div class="link-icon" style="background:#188038; color:#fff;">📤</div>
+          <div class="link-meta">
+            <h3>Publicar una app</h3>
+            <p>Guía paso a paso (Play)</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://play.google.com/about/developer-content-policy/" target="_blank">
+          <div class="link-icon" style="background:#ea4335; color:#fff;">⚖</div>
+          <div class="link-meta">
+            <h3>Developer Content Policy</h3>
+            <p>Políticas de contenido Google Play</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://support.google.com/googleplay/android-developer/answer/9859455" target="_blank">
+          <div class="link-icon" style="background:#5f6368; color:#fff;">📋</div>
+          <div class="link-meta">
+            <h3>Política de privacidad (Play)</h3>
+            <p>Requisitos de URL y datos</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developer.android.com/google/play/billing" target="_blank">
+          <div class="link-icon" style="background:#073042; color:#fff;">💰</div>
+          <div class="link-meta">
+            <h3>Google Play Billing</h3>
+            <p>Facturación y suscripciones</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://developers.google.com/identity/protocols/oauth2" target="_blank">
+          <div class="link-icon" style="background:#4285f4; color:#fff;">OAuth</div>
+          <div class="link-meta">
+            <h3>Google OAuth 2.0</h3>
+            <p>Documentación de autenticación</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title" style="margin-top:16px;">✉ Brevo · Resend</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://help.brevo.com" target="_blank">
+          <div class="link-icon" style="background:#0696d7; color:#fff;">?</div>
+          <div class="link-meta">
+            <h3>Brevo — Ayuda</h3>
+            <p>SMTP, API, remitentes, límites</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://resend.com/docs" target="_blank">
+          <div class="link-icon" style="background:#6366f1; color:#fff;">📖</div>
+          <div class="link-meta">
+            <h3>Resend — Documentación</h3>
+            <p>API, dominios, envío transaccional</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title" style="margin-top:16px;">💳 Stripe</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://support.stripe.com" target="_blank">
+          <div class="link-icon" style="background:#635bff; color:#fff;">?</div>
+          <div class="link-meta">
+            <h3>Stripe — Soporte</h3>
+            <p>Centro de ayuda y preguntas frecuentes</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://docs.stripe.com" target="_blank">
+          <div class="link-icon" style="background:#0a2540; color:#fff;">📖</div>
+          <div class="link-meta">
+            <h3>Stripe — Documentación</h3>
+            <p>API, webhooks, Checkout, Billing</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title" style="margin-top:16px;">☁ Render · Vercel</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://render.com/docs" target="_blank">
+          <div class="link-icon" style="background:#46e3b7; color:#0f172a;">📖</div>
+          <div class="link-meta">
+            <h3>Render — Docs</h3>
+            <p>Deploy, env vars, límites free tier</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://vercel.com/docs" target="_blank">
+          <div class="link-icon" style="background:#000; color:#fff;">▲</div>
+          <div class="link-meta">
+            <h3>Vercel — Documentación</h3>
+            <p>Next.js, dominios, variables</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title" style="margin-top:16px;">🤖 Codemagic · Capacitor</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://docs.codemagic.io" target="_blank">
+          <div class="link-icon" style="background:#f45d48; color:#fff;">📖</div>
+          <div class="link-meta">
+            <h3>Codemagic — Docs</h3>
+            <p>CI iOS/Android, firma, YAML</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://capacitorjs.com/docs" target="_blank">
+          <div class="link-icon" style="background:#176bff; color:#fff;">⚡</div>
+          <div class="link-meta">
+            <h3>Capacitor — Docs</h3>
+            <p>Web en nativo, plugins</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://capacitorjs.com/docs/ios" target="_blank">
+          <div class="link-icon" style="background:#000; color:#fff;">🍎</div>
+          <div class="link-meta">
+            <h3>Capacitor iOS</h3>
+            <p>Xcode, configuración iOS</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://capacitorjs.com/docs/android" target="_blank">
+          <div class="link-icon" style="background:#3ddc84; color:#0d1117;">🤖</div>
+          <div class="link-meta">
+            <h3>Capacitor Android</h3>
+            <p>Gradle, configuración Android</p>
+          </div>
+        </a>
+      </div>
+
+      <div class="section-title" style="margin-top:16px;">⚖ Legal (referencia)</div>
+      <div class="link-grid">
+        <a class="link-card" href="https://gdpr.eu/" target="_blank">
+          <div class="link-icon" style="background:#003399; color:#fff;">EU</div>
+          <div class="link-meta">
+            <h3>GDPR (UE)</h3>
+            <p>Reglamento general de protección de datos</p>
+          </div>
+        </a>
+        <a class="link-card" href="https://www.edoeb.admin.ch/edoeb/en/home.html" target="_blank">
+          <div class="link-icon" style="background:#d52b1e; color:#fff;">CH</div>
+          <div class="link-meta">
+            <h3>EDÖB (Suiza)</h3>
+            <p>Autoridad suiza de protección de datos</p>
           </div>
         </a>
       </div>
