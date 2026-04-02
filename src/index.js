@@ -8200,7 +8200,7 @@ app.get("/admin/settings", requireRoleHtml(["admin", "superuser"]), (req, res) =
           </div>
         </a>
         <a class="link-card" href="https://developer.apple.com/app-store/review/guidelines/" target="_blank">
-          <div class="link-icon" style="background:#bf4800; color:#fff;">§</div>
+          <div class="link-icon" style="background:#bf4800; color:#fff;">📜</div>
           <div class="link-meta">
             <h3>App Review Guidelines</h3>
             <p>Normas de revisión App Store</p>
