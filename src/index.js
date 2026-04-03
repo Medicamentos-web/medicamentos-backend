@@ -552,6 +552,17 @@ ensureAuthProviderColumn().catch((error) => {
   console.error("ERROR: No se pudo añadir auth_provider:", error.message);
 });
 
+async function ensureAppleSubColumn() {
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_sub VARCHAR(255)`);
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_sub ON users (apple_sub) WHERE apple_sub IS NOT NULL AND apple_sub <> ''`
+  );
+}
+
+ensureAppleSubColumn().catch((error) => {
+  console.error("ERROR: No se pudo añadir apple_sub:", error.message);
+});
+
 async function ensureDoctorTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS family_doctors (
@@ -2451,24 +2462,53 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
       try {
         const payload = jwt.decode(idToken);
         if (!payload?.sub) return done(null, false);
-        const email = payload.email;
-        if (!email || !String(email).includes("@")) {
-          return done(new Error("Apple no devolvió email. Usa otra cuenta o permite el email."), null);
+        const sub = String(payload.sub);
+        const emailFromToken =
+          payload.email && String(payload.email).includes("@")
+            ? String(payload.email).trim().toLowerCase()
+            : null;
+
+        // 1) Inicios posteriores: Apple suele omitir "email" en el id_token; el identificador estable es "sub".
+        const bySub = await pool.query(
+          `SELECT id, family_id, name, email, role, must_change_password FROM users WHERE apple_sub = $1 LIMIT 1`,
+          [sub]
+        );
+        if (bySub.rows.length > 0) {
+          const user = bySub.rows[0];
+          await pool.query(
+            `UPDATE users SET auth_provider = 'apple', last_login = NOW(), last_ip = $1 WHERE id = $2`,
+            [null, user.id]
+          );
+          user._oauthIsNew = false;
+          return done(null, user);
         }
-        let displayName = String(email).split("@")[0];
-        if (req.appleProfile && req.appleProfile.name) {
-          const n = req.appleProfile.name;
-          displayName = [n.firstName, n.lastName].filter(Boolean).join(" ").trim() || displayName;
+
+        // 2) Primer acceso (o Apple aún envía email): alta automática como Google — sin registro manual previo.
+        if (emailFromToken) {
+          let displayName = String(emailFromToken).split("@")[0];
+          if (req.appleProfile && req.appleProfile.name) {
+            const n = req.appleProfile.name;
+            displayName = [n.firstName, n.lastName].filter(Boolean).join(" ").trim() || displayName;
+          }
+          const syntheticProfile = {
+            emails: [{ value: emailFromToken }],
+            displayName,
+          };
+          const result = await findOrCreateOAuthUser(syntheticProfile, "apple");
+          if (!result) return done(null, false);
+          const { user, isNew } = result;
+          await pool.query(`UPDATE users SET apple_sub = $1 WHERE id = $2`, [sub, user.id]);
+          user._oauthIsNew = isNew;
+          return done(null, user);
         }
-        const syntheticProfile = {
-          emails: [{ value: String(email).trim().toLowerCase() }],
-          displayName,
-        };
-        const result = await findOrCreateOAuthUser(syntheticProfile, "apple");
-        if (!result) return done(null, false);
-        const { user, isNew } = result;
-        if (user) user._oauthIsNew = isNew;
-        done(null, user || false);
+
+        // 3) Sin email y sin fila con este sub (p. ej. cuenta Apple creada antes de apple_sub): no podemos enlazar.
+        return done(
+          new Error(
+            "Apple no envió el email en este inicio. En el iPhone: Ajustes → Apple ID → Inicio de sesión con Apple → MediControl → Dejar de usar → vuelve a entrar con Apple y elige compartir email."
+          ),
+          null
+        );
       } catch (err) {
         done(err, null);
       }
