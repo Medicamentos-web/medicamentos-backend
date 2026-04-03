@@ -49,8 +49,9 @@ function patchAppleOAuthAccessToken(appleStrategy, opts) {
             if (error) {
               if (error.statusCode != null && error.data != null) {
                 const raw = error.data;
+                const rawStr = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
                 try {
-                  const p = typeof raw === "string" ? JSON.parse(raw) : raw;
+                  const p = JSON.parse(rawStr);
                   if (p && p.error) {
                     const msg = p.error_description || p.error;
                     callback(new Error(`Apple token: ${msg}`));
@@ -60,9 +61,7 @@ function patchAppleOAuthAccessToken(appleStrategy, opts) {
                   /* seguir */
                 }
                 callback(
-                  new Error(
-                    `Apple token: HTTP ${error.statusCode} ${String(raw).slice(0, 300)}`
-                  )
+                  new Error(`Apple token: HTTP ${error.statusCode} ${rawStr.slice(0, 300)}`)
                 );
                 return;
               }
@@ -71,7 +70,8 @@ function patchAppleOAuthAccessToken(appleStrategy, opts) {
             }
             let results;
             try {
-              results = JSON.parse(data);
+              const dataStr = Buffer.isBuffer(data) ? data.toString("utf8") : String(data || "");
+              results = JSON.parse(dataStr);
             } catch (e) {
               callback(
                 new Error(
@@ -85,11 +85,12 @@ function patchAppleOAuthAccessToken(appleStrategy, opts) {
               callback(new Error(`Apple token: ${msg}`));
               return;
             }
-            const access_token = results.access_token;
             const refresh_token = results.refresh_token;
+            // Apple a veces omite access_token pero envía id_token; passport-oauth2 exige un accessToken truthy.
+            const access_token = results.access_token || results.id_token;
             if (!access_token) {
               callback(
-                new Error(`Apple token: sin access_token (${JSON.stringify(results).slice(0, 500)})`)
+                new Error(`Apple token: sin access_token ni id_token (${JSON.stringify(results).slice(0, 500)})`)
               );
               return;
             }

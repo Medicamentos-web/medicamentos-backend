@@ -2185,22 +2185,55 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
   console.log("[OAUTH] Google configurado");
 }
 
-/** Texto para redirect / logs cuando passport devuelve InternalOAuthError con oauthError = { statusCode, data } (respuesta 4xx de Apple). */
+/** Normaliza cuerpo de error de node-oauth (string / Buffer). */
+function oauthErrBodyToString(data) {
+  if (data == null) return "";
+  if (Buffer.isBuffer(data)) return data.toString("utf8");
+  return String(data);
+}
+
+/** Texto para redirect / logs: TokenError, { statusCode, data }, Error anidados en oauthError. */
 function applePassportErrToUserMessage(err) {
-  const inner = err && err.oauthError;
+  if (!err) return "oauth";
+  if (err.name === "TokenError") {
+    const m = (err.message && String(err.message).trim()) || err.code;
+    return m ? `Apple token: ${m}` : `Apple token: ${err.code || "error"}`;
+  }
+
+  let inner = err.oauthError;
+  let depth = 0;
+  while (inner && inner.oauthError && depth < 4) {
+    inner = inner.oauthError;
+    depth++;
+  }
+  if (!inner) inner = err;
+
   if (inner && inner.data != null) {
     try {
-      const raw = inner.data;
-      const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const raw = oauthErrBodyToString(inner.data);
+      const d = JSON.parse(raw);
       if (d && d.error) return `Apple token: ${d.error_description || d.error}`;
     } catch (_) {
-      /* ignorar */
+      /* no JSON */
     }
-    if (inner.statusCode) {
-      return `Apple HTTP ${inner.statusCode}: ${String(inner.data).slice(0, 200)}`;
+    if (inner.statusCode != null) {
+      return `Apple HTTP ${inner.statusCode}: ${oauthErrBodyToString(inner.data).slice(0, 220)}`;
     }
   }
-  return (inner && inner.message) || (err && err.message) || "oauth";
+
+  const nestedMsg =
+    err.oauthError && typeof err.oauthError.message === "string"
+      ? err.oauthError.message
+      : null;
+  if (nestedMsg && !nestedMsg.includes("Failed to obtain access token")) {
+    return nestedMsg;
+  }
+
+  const msg = nestedMsg || (err && err.message) || "oauth";
+  if (typeof msg === "string" && msg.includes("Failed to obtain access token")) {
+    return "Apple OAuth: token vacío o rechazado (Service ID, Return URL = callback del backend, clave .p8, APPLE_TEAM_ID / APPLE_KEY_ID / APPLE_SERVICE_ID en Render).";
+  }
+  return msg;
 }
 
 if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
@@ -2255,6 +2288,16 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
         const inner = err.oauthError || err;
         const detailMsg = applePassportErrToUserMessage(err);
         console.error("[AUTH APPLE] OAuth:", detailMsg);
+        try {
+          const o = err.oauthError;
+          if (o && o.data != null) {
+            console.error("[AUTH APPLE] diag raw:", oauthErrBodyToString(o.data).slice(0, 240));
+          } else {
+            console.error("[AUTH APPLE] diag:", err.name, o ? typeof o : "sin oauthError");
+          }
+        } catch (_) {
+          /* ignorar */
+        }
         if (inner?.statusCode) console.error("[AUTH APPLE] HTTP status:", inner.statusCode);
         if (inner?.data) {
           const d = inner.data;
