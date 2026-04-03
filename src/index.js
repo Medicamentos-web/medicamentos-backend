@@ -104,6 +104,70 @@ const BACKEND_BASE_URL = normalizeBaseUrl(process.env.BACKEND_PUBLIC_URL || "htt
 const APPLE_CALLBACK_EFFECTIVE =
   process.env.APPLE_CALLBACK_URL || `${BACKEND_BASE_URL}/auth/apple/callback`;
 
+/** Si es true, logs extra en flujo Apple y GET /api/debug/apple-oauth sin token (quitar tras depurar). */
+const APPLE_OAUTH_DEBUG =
+  process.env.APPLE_OAUTH_DEBUG === "1" || process.env.APPLE_OAUTH_DEBUG === "true";
+/** Opcional: permite /api/debug/apple-oauth?token=... sin APPLE_OAUTH_DEBUG (más seguro en prod). */
+const APPLE_DEBUG_TOKEN = (process.env.APPLE_DEBUG_TOKEN || "").trim();
+
+function maskAppleId(s) {
+  if (!s || typeof s !== "string") return null;
+  if (s.length <= 8) return `${s.slice(0, 2)}…${s.slice(-2)}`;
+  return `${s.slice(0, 4)}…${s.slice(-4)}`;
+}
+
+function appleOAuthDebugSnapshot() {
+  let pemOk = false;
+  let pemError = null;
+  try {
+    if (APPLE_PRIVATE_KEY) {
+      crypto.createPrivateKey({ key: APPLE_PRIVATE_KEY, format: "pem" });
+      pemOk = true;
+    }
+  } catch (e) {
+    pemError = e.message;
+  }
+  return {
+    ok: true,
+    timestamp: new Date().toISOString(),
+    apple_oauth_debug_logs: APPLE_OAUTH_DEBUG,
+    warning: APPLE_OAUTH_DEBUG
+      ? "APPLE_OAUTH_DEBUG está activo: desactívalo en Render cuando termines."
+      : null,
+    apple_sign_in_configured: !!(
+      APPLE_SERVICE_ID &&
+      APPLE_TEAM_ID &&
+      APPLE_KEY_ID &&
+      APPLE_PRIVATE_KEY
+    ),
+    service_id_masked: maskAppleId(APPLE_SERVICE_ID),
+    team_id_masked: maskAppleId(APPLE_TEAM_ID),
+    key_id_masked: maskAppleId(APPLE_KEY_ID),
+    private_key_pem_length: APPLE_PRIVATE_KEY ? APPLE_PRIVATE_KEY.length : 0,
+    private_key_has_begin_private_key: APPLE_PRIVATE_KEY
+      ? APPLE_PRIVATE_KEY.includes("BEGIN PRIVATE KEY")
+      : false,
+    private_key_ecdsa_load_ok: pemOk,
+    private_key_load_error: pemError,
+    backend_base_url: BACKEND_BASE_URL,
+    callback_url_effective: APPLE_CALLBACK_EFFECTIVE,
+    frontend_url: FRONTEND_URL,
+    apple_developer_checklist: {
+      return_url_must_match_exactly: APPLE_CALLBACK_EFFECTIVE,
+      domains_subdomains_must_include_frontend:
+        "medicamentos-frontend.vercel.app (ajusta si usas otro dominio)",
+      invalid_client_typically:
+        "Service ID ≠ APPLE_SERVICE_ID, Return URL distinto, o Team/Key/.p8 no corresponden a la clave",
+    },
+  };
+}
+
+if (APPLE_OAUTH_DEBUG) {
+  console.warn(
+    "[OAUTH] APPLE_OAUTH_DEBUG=1 → logs extra en /auth/apple y callback; GET /api/debug/apple-oauth sin token"
+  );
+}
+
 // Stripe webhook necesita raw body - ANTES de express.json()
 app.post("/api/billing/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   if (!stripe || !STRIPE_WEBHOOK_SECRET) {
@@ -1995,6 +2059,22 @@ app.get("/diag", (req, res) => {
   });
 });
 
+/**
+ * Depuración Apple OAuth (sin exponer secretos completos).
+ * - Activo si APPLE_OAUTH_DEBUG=1, o si ?token= / header x-apple-debug-token coincide con APPLE_DEBUG_TOKEN.
+ */
+app.get("/api/debug/apple-oauth", (req, res) => {
+  const q = String(req.query.token || "").trim();
+  const h = String(req.headers["x-apple-debug-token"] || "").trim();
+  const allowed =
+    APPLE_OAUTH_DEBUG ||
+    (APPLE_DEBUG_TOKEN && (q === APPLE_DEBUG_TOKEN || h === APPLE_DEBUG_TOKEN));
+  if (!allowed) {
+    return res.status(404).json({ error: "not found" });
+  }
+  res.json(appleOAuthDebugSnapshot());
+});
+
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -2397,8 +2477,33 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
     privateKeyString: APPLE_PRIVATE_KEY,
   });
   passport.use(appleStrategy);
-  app.get("/auth/apple", passport.authenticate("apple"));
+  app.get(
+    "/auth/apple",
+    (req, res, next) => {
+      if (APPLE_OAUTH_DEBUG) {
+        console.log("[AUTH APPLE DEBUG] GET /auth/apple", {
+          host: req.get("host"),
+          xForwardedProto: req.get("x-forwarded-proto"),
+          xForwardedHost: req.get("x-forwarded-host"),
+          referer: req.get("referer"),
+        });
+      }
+      next();
+    },
+    passport.authenticate("apple")
+  );
   app.post("/auth/apple/callback", (req, res, next) => {
+    if (APPLE_OAUTH_DEBUG) {
+      const b = req.body || {};
+      console.log("[AUTH APPLE DEBUG] POST /auth/apple/callback", {
+        hasCode: !!b.code,
+        hasState: !!b.state,
+        hasIdToken: !!b.id_token,
+        hasUser: !!b.user,
+        bodyKeys: typeof b === "object" && !Array.isArray(b) ? Object.keys(b) : [],
+        contentType: req.get("content-type"),
+      });
+    }
     passport.authenticate("apple", { session: false }, (err, user, _info) => {
       if (err) {
         const inner = err.oauthError || err;
