@@ -163,9 +163,7 @@ function appleOAuthDebugSnapshot() {
 }
 
 if (APPLE_OAUTH_DEBUG) {
-  console.warn(
-    "[OAUTH] APPLE_OAUTH_DEBUG=1 → logs extra en /auth/apple y callback; GET /api/debug/apple-oauth sin token"
-  );
+  console.warn("[OAUTH] APPLE_OAUTH_DEBUG=1 → logs extra en GET /auth/apple y POST /auth/apple/callback");
 }
 
 // Stripe webhook necesita raw body - ANTES de express.json()
@@ -2060,25 +2058,22 @@ app.get("/diag", (req, res) => {
 });
 
 /**
- * Depuración Apple OAuth (sin exponer secretos completos).
- * - Activo si APPLE_OAUTH_DEBUG=1, o si ?token= / header x-apple-debug-token coincide con APPLE_DEBUG_TOKEN.
- * - Si no está activo: 403 + JSON (evita “Cannot GET” confuso si la ruta no coincide en otro host).
+ * Depuración Apple OAuth: siempre 200 + JSON enmascarado (sin .p8 ni IDs completos).
+ * No requiere APPLE_OAUTH_DEBUG; sirve para contrastar Return URL / Service ID con Apple Developer.
  */
 function handleAppleOauthDebug(req, res) {
   const q = String(req.query.token || "").trim();
   const h = String(req.headers["x-apple-debug-token"] || "").trim();
-  const allowed =
+  const extraLogs =
     APPLE_OAUTH_DEBUG ||
     (APPLE_DEBUG_TOKEN && (q === APPLE_DEBUG_TOKEN || h === APPLE_DEBUG_TOKEN));
-  if (!allowed) {
-    return res.status(403).json({
-      error: "debug_disabled",
-      hint: "En Render añade APPLE_OAUTH_DEBUG=1 (temporal) o APPLE_DEBUG_TOKEN y abre esta URL con ?token=TU_TOKEN",
-      backend_example:
-        "https://medicamentos-backend.onrender.com/api/debug/apple-oauth",
-    });
+  const snap = appleOAuthDebugSnapshot();
+  snap.extra_debug_logs = extraLogs;
+  if (!extraLogs) {
+    snap.note =
+      "Snapshot público enmascarado. Para logs extra en consola del servidor: APPLE_OAUTH_DEBUG=1 en Render.";
   }
-  res.json(appleOAuthDebugSnapshot());
+  res.json(snap);
 }
 app.get("/api/debug/apple-oauth", handleAppleOauthDebug);
 app.get("/debug/apple-oauth", handleAppleOauthDebug);
