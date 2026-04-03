@@ -2238,7 +2238,10 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
             typeof d === "string" ? d : JSON.stringify(d)
           );
         }
-        return next(err);
+        // Volver al frontend con error legible (evita página 500 HTML en el dominio del backend)
+        const reason = encodeURIComponent(String(err.message || "oauth").slice(0, 300));
+        const sep = FRONTEND_URL.includes("?") ? "&" : "?";
+        return res.redirect(`${FRONTEND_URL}${sep}error=apple_oauth&reason=${reason}`);
       }
       if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
       req.user = user;
