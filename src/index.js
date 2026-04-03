@@ -16,6 +16,7 @@ const cors = require("cors");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const AppleStrategy = require("passport-apple");
+const { patchAppleOAuthAccessToken } = require("./apple-oauth-fix");
 const pg = require("pg");
 const { Pool } = pg;
 // Fix: devolver DATE (oid 1082) como string "YYYY-MM-DD" en vez de objeto Date
@@ -2186,50 +2187,56 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
 
 if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
   console.log("[OAUTH] Apple callbackURL efectiva:", APPLE_CALLBACK_EFFECTIVE, "(debe coincidir con Return URL en Apple Developer)");
-  passport.use(
-    new AppleStrategy(
-      {
-        clientID: APPLE_SERVICE_ID,
-        teamID: APPLE_TEAM_ID,
-        keyID: APPLE_KEY_ID,
-        privateKeyString: APPLE_PRIVATE_KEY,
-        callbackURL: APPLE_CALLBACK_EFFECTIVE,
-        passReqToCallback: true,
-      },
-      async (req, _accessToken, _refreshToken, idToken, _profile, done) => {
-        try {
-          const payload = jwt.decode(idToken);
-          if (!payload?.sub) return done(null, false);
-          const email = payload.email;
-          if (!email || !String(email).includes("@")) {
-            return done(new Error("Apple no devolvió email. Usa otra cuenta o permite el email."), null);
-          }
-          let displayName = String(email).split("@")[0];
-          if (req.appleProfile && req.appleProfile.name) {
-            const n = req.appleProfile.name;
-            displayName = [n.firstName, n.lastName].filter(Boolean).join(" ").trim() || displayName;
-          }
-          const syntheticProfile = {
-            emails: [{ value: String(email).trim().toLowerCase() }],
-            displayName,
-          };
-          const result = await findOrCreateOAuthUser(syntheticProfile, "apple");
-          if (!result) return done(null, false);
-          const { user, isNew } = result;
-          if (user) user._oauthIsNew = isNew;
-          done(null, user || false);
-        } catch (err) {
-          done(err, null);
+  const appleStrategy = new AppleStrategy(
+    {
+      clientID: APPLE_SERVICE_ID,
+      teamID: APPLE_TEAM_ID,
+      keyID: APPLE_KEY_ID,
+      privateKeyString: APPLE_PRIVATE_KEY,
+      callbackURL: APPLE_CALLBACK_EFFECTIVE,
+      passReqToCallback: true,
+    },
+    async (req, _accessToken, _refreshToken, idToken, _profile, done) => {
+      try {
+        const payload = jwt.decode(idToken);
+        if (!payload?.sub) return done(null, false);
+        const email = payload.email;
+        if (!email || !String(email).includes("@")) {
+          return done(new Error("Apple no devolvió email. Usa otra cuenta o permite el email."), null);
         }
+        let displayName = String(email).split("@")[0];
+        if (req.appleProfile && req.appleProfile.name) {
+          const n = req.appleProfile.name;
+          displayName = [n.firstName, n.lastName].filter(Boolean).join(" ").trim() || displayName;
+        }
+        const syntheticProfile = {
+          emails: [{ value: String(email).trim().toLowerCase() }],
+          displayName,
+        };
+        const result = await findOrCreateOAuthUser(syntheticProfile, "apple");
+        if (!result) return done(null, false);
+        const { user, isNew } = result;
+        if (user) user._oauthIsNew = isNew;
+        done(null, user || false);
+      } catch (err) {
+        done(err, null);
       }
-    )
+    }
   );
+  patchAppleOAuthAccessToken(appleStrategy, {
+    clientID: APPLE_SERVICE_ID,
+    teamID: APPLE_TEAM_ID,
+    keyID: APPLE_KEY_ID,
+    privateKeyString: APPLE_PRIVATE_KEY,
+  });
+  passport.use(appleStrategy);
   app.get("/auth/apple", passport.authenticate("apple"));
   app.post("/auth/apple/callback", (req, res, next) => {
     passport.authenticate("apple", { session: false }, (err, user, _info) => {
       if (err) {
         const inner = err.oauthError || err;
-        console.error("[AUTH APPLE] Failed to obtain access token:", err.message);
+        const detailMsg = inner?.message || err.message;
+        console.error("[AUTH APPLE] OAuth:", detailMsg);
         if (inner?.statusCode) console.error("[AUTH APPLE] HTTP status:", inner.statusCode);
         if (inner?.data) {
           const d = inner.data;
@@ -2238,8 +2245,8 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
             typeof d === "string" ? d : JSON.stringify(d)
           );
         }
-        // Volver al frontend con error legible (evita página 500 HTML en el dominio del backend)
-        const reason = encodeURIComponent(String(err.message || "oauth").slice(0, 300));
+        // Volver al frontend con error legible (InternalOAuthError deja el detalle en oauthError)
+        const reason = encodeURIComponent(String(detailMsg || "oauth").slice(0, 300));
         const sep = FRONTEND_URL.includes("?") ? "&" : "?";
         return res.redirect(`${FRONTEND_URL}${sep}error=apple_oauth&reason=${reason}`);
       }
