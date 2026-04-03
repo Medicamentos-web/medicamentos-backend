@@ -41,15 +41,65 @@ function normalizeBaseUrl(u) {
   return u.replace(/\/+$/, "");
 }
 
+/** Texto PEM de Apple (.p8) desde Render / JSON: comillas, \\n, doble escape, etc. */
+function normalizeApplePrivateKeyPem(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  let s = raw.trim();
+  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1);
+  }
+  s = s.replace(/\\n/g, "\n").replace(/\r\n/g, "\n");
+  s = s.replace(/\\\\n/g, "\n");
+  s = s.replace(/\u2028/g, "\n").replace(/\u2029/g, "\n");
+  return s.trim();
+}
+
+/** Si el PEM perdió saltos dentro del base64, reagrupa en líneas de 64 (PKCS#8 / EC). */
+function fixPemBodyLineBreaks(pem) {
+  const m = pem.match(/-----BEGIN ([^-]+)-----([\s\S]*?)-----END ([^-]+)-----/);
+  if (!m) return pem;
+  const body = m[2].replace(/\s/g, "");
+  if (!body) return pem;
+  const lines = body.match(/.{1,64}/g) || [];
+  return `-----BEGIN ${m[1]}-----\n${lines.join("\n")}\n-----END ${m[3]}-----`;
+}
+
+/** Valida y re-exporta PEM PKCS#8 para ES256 (evita error "must be an asymmetric key"). */
+function applePrivateKeyPemForEs256(rawEnv) {
+  const pem0 = normalizeApplePrivateKeyPem(rawEnv);
+  if (!pem0) return "";
+  const tryExport = (p) => {
+    const key = crypto.createPrivateKey({ key: p, format: "pem" });
+    return key.export({ format: "pem", type: "pkcs8" });
+  };
+  try {
+    return tryExport(pem0);
+  } catch (e1) {
+    try {
+      return tryExport(fixPemBodyLineBreaks(pem0));
+    } catch (e2) {
+      throw new Error(`${e1.message} | tras reagrupar base64: ${e2.message}`);
+    }
+  }
+}
+
 // OAuth config — solo activo si están configuradas las credenciales
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const APPLE_SERVICE_ID = process.env.APPLE_SERVICE_ID || "";
 const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID || "";
 const APPLE_KEY_ID = process.env.APPLE_KEY_ID || "";
-const APPLE_PRIVATE_KEY = (process.env.APPLE_PRIVATE_KEY || "")
-  .replace(/\\n/g, "\n")
-  .replace(/\r\n/g, "\n");
+let APPLE_PRIVATE_KEY = "";
+try {
+  APPLE_PRIVATE_KEY = applePrivateKeyPemForEs256(process.env.APPLE_PRIVATE_KEY || "");
+  if (APPLE_PRIVATE_KEY) {
+    console.log("[OAUTH] APPLE_PRIVATE_KEY: clave EC cargada (ES256),", APPLE_PRIVATE_KEY.length, "bytes PEM");
+  }
+} catch (e) {
+  console.error("[OAUTH] APPLE_PRIVATE_KEY no válida para ES256:", e.message);
+  APPLE_PRIVATE_KEY = normalizeApplePrivateKeyPem(process.env.APPLE_PRIVATE_KEY || "");
+}
 const BACKEND_BASE_URL = normalizeBaseUrl(process.env.BACKEND_PUBLIC_URL || "http://localhost:4000");
 const APPLE_CALLBACK_EFFECTIVE =
   process.env.APPLE_CALLBACK_URL || `${BACKEND_BASE_URL}/auth/apple/callback`;
