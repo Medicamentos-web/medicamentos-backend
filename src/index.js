@@ -33,13 +33,24 @@ const STRIPE_PRICE_ID_YEARLY = process.env.STRIPE_PRICE_ID_YEARLY || "";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
+/** Evita doble barra en /auth/.../callback (Apple rechaza el intercambio de token si redirect_uri no coincide al carácter). */
+function normalizeBaseUrl(u) {
+  if (!u || typeof u !== "string") return u;
+  return u.replace(/\/+$/, "");
+}
+
 // OAuth config — solo activo si están configuradas las credenciales
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const APPLE_SERVICE_ID = process.env.APPLE_SERVICE_ID || "";
 const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID || "";
 const APPLE_KEY_ID = process.env.APPLE_KEY_ID || "";
-const APPLE_PRIVATE_KEY = (process.env.APPLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const APPLE_PRIVATE_KEY = (process.env.APPLE_PRIVATE_KEY || "")
+  .replace(/\\n/g, "\n")
+  .replace(/\r\n/g, "\n");
+const BACKEND_BASE_URL = normalizeBaseUrl(process.env.BACKEND_PUBLIC_URL || "http://localhost:4000");
+const APPLE_CALLBACK_EFFECTIVE =
+  process.env.APPLE_CALLBACK_URL || `${BACKEND_BASE_URL}/auth/apple/callback`;
 
 // Stripe webhook necesita raw body - ANTES de express.json()
 app.post("/api/billing/webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -135,6 +146,7 @@ const allowedOrigins = [
   /^https:\/\/medicamentos-backend\.onrender\.com$/,
   /^https:\/\/medicamentos-frontend\.vercel\.app$/,
   /^https:\/\/.*\.vercel\.app$/,
+  /^https:\/\/appleid\.apple\.com$/,
 ];
 
 // Orígenes adicionales desde variable de entorno (separados por coma)
@@ -2137,7 +2149,7 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
       {
         clientID: GOOGLE_CLIENT_ID,
         clientSecret: GOOGLE_CLIENT_SECRET,
-        callbackURL: process.env.GOOGLE_CALLBACK_URL || `${process.env.BACKEND_PUBLIC_URL || "http://localhost:4000"}/auth/google/callback`,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL || `${BACKEND_BASE_URL}/auth/google/callback`,
       },
       async (_accessToken, _refreshToken, profile, done) => {
         try {
@@ -2173,6 +2185,7 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
 }
 
 if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
+  console.log("[OAUTH] Apple callbackURL efectiva:", APPLE_CALLBACK_EFFECTIVE, "(debe coincidir con Return URL en Apple Developer)");
   passport.use(
     new AppleStrategy(
       {
@@ -2180,9 +2193,7 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
         teamID: APPLE_TEAM_ID,
         keyID: APPLE_KEY_ID,
         privateKeyString: APPLE_PRIVATE_KEY,
-        callbackURL:
-          process.env.APPLE_CALLBACK_URL ||
-          `${process.env.BACKEND_PUBLIC_URL || "http://localhost:4000"}/auth/apple/callback`,
+        callbackURL: APPLE_CALLBACK_EFFECTIVE,
         passReqToCallback: true,
       },
       async (req, _accessToken, _refreshToken, idToken, _profile, done) => {
@@ -2214,19 +2225,33 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
     )
   );
   app.get("/auth/apple", passport.authenticate("apple"));
-  app.post(
-    "/auth/apple/callback",
-    passport.authenticate("apple", { session: false }),
-    (req, res) => {
-      const user = req.user;
+  app.post("/auth/apple/callback", (req, res, next) => {
+    passport.authenticate("apple", { session: false }, (err, user, _info) => {
+      if (err) {
+        const inner = err.oauthError || err;
+        console.error("[AUTH APPLE] Failed to obtain access token:", err.message);
+        if (inner?.statusCode) console.error("[AUTH APPLE] HTTP status:", inner.statusCode);
+        if (inner?.data) {
+          const d = inner.data;
+          console.error(
+            "[AUTH APPLE] Cuerpo de error de Apple:",
+            typeof d === "string" ? d : JSON.stringify(d)
+          );
+        }
+        return next(err);
+      }
       if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
-      maybeSendOAuthWelcome(user, "apple");
-      const token = signToken(user);
-      res.cookie(TOKEN_NAME, token, cookieOpts(req));
-      const sep = FRONTEND_URL.includes("?") ? "&" : "?";
-      res.redirect(FRONTEND_URL + sep + "oauth=ok&token=" + encodeURIComponent(token));
-    }
-  );
+      req.user = user;
+      next();
+    })(req, res, next);
+  }, (req, res) => {
+    const user = req.user;
+    maybeSendOAuthWelcome(user, "apple");
+    const token = signToken(user);
+    res.cookie(TOKEN_NAME, token, cookieOpts(req));
+    const sep = FRONTEND_URL.includes("?") ? "&" : "?";
+    res.redirect(FRONTEND_URL + sep + "oauth=ok&token=" + encodeURIComponent(token));
+  });
   console.log("[OAUTH] Sign in with Apple configurado");
 }
 
