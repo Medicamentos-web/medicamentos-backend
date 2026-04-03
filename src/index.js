@@ -2064,9 +2064,10 @@ app.get("/diag", (req, res) => {
 function handleAppleOauthDebug(req, res) {
   const q = String(req.query.token || "").trim();
   const h = String(req.headers["x-apple-debug-token"] || "").trim();
-  const extraLogs =
+  const extraLogs = !!(
     APPLE_OAUTH_DEBUG ||
-    (APPLE_DEBUG_TOKEN && (q === APPLE_DEBUG_TOKEN || h === APPLE_DEBUG_TOKEN));
+    (APPLE_DEBUG_TOKEN && (q === APPLE_DEBUG_TOKEN || h === APPLE_DEBUG_TOKEN))
+  );
   const snap = appleOAuthDebugSnapshot();
   snap.extra_debug_logs = extraLogs;
   if (!extraLogs) {
