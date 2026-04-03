@@ -2185,6 +2185,24 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
   console.log("[OAUTH] Google configurado");
 }
 
+/** Texto para redirect / logs cuando passport devuelve InternalOAuthError con oauthError = { statusCode, data } (respuesta 4xx de Apple). */
+function applePassportErrToUserMessage(err) {
+  const inner = err && err.oauthError;
+  if (inner && inner.data != null) {
+    try {
+      const raw = inner.data;
+      const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (d && d.error) return `Apple token: ${d.error_description || d.error}`;
+    } catch (_) {
+      /* ignorar */
+    }
+    if (inner.statusCode) {
+      return `Apple HTTP ${inner.statusCode}: ${String(inner.data).slice(0, 200)}`;
+    }
+  }
+  return (inner && inner.message) || (err && err.message) || "oauth";
+}
+
 if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
   console.log("[OAUTH] Apple callbackURL efectiva:", APPLE_CALLBACK_EFFECTIVE, "(debe coincidir con Return URL en Apple Developer)");
   const appleStrategy = new AppleStrategy(
@@ -2235,7 +2253,7 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
     passport.authenticate("apple", { session: false }, (err, user, _info) => {
       if (err) {
         const inner = err.oauthError || err;
-        const detailMsg = inner?.message || err.message;
+        const detailMsg = applePassportErrToUserMessage(err);
         console.error("[AUTH APPLE] OAuth:", detailMsg);
         if (inner?.statusCode) console.error("[AUTH APPLE] HTTP status:", inner.statusCode);
         if (inner?.data) {

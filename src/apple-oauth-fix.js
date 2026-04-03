@@ -44,7 +44,28 @@ function patchAppleOAuthAccessToken(appleStrategy, opts) {
           post_data,
           null,
           function (error, data, _response) {
+            // node-oauth devuelve { statusCode, data } en 4xx/5xx; el JSON de Apple va en data.
+            // Si pasamos ese objeto tal cual, passport-oauth2 envuelve InternalOAuthError sin .message útil.
             if (error) {
+              if (error.statusCode != null && error.data != null) {
+                const raw = error.data;
+                try {
+                  const p = typeof raw === "string" ? JSON.parse(raw) : raw;
+                  if (p && p.error) {
+                    const msg = p.error_description || p.error;
+                    callback(new Error(`Apple token: ${msg}`));
+                    return;
+                  }
+                } catch (_) {
+                  /* seguir */
+                }
+                callback(
+                  new Error(
+                    `Apple token: HTTP ${error.statusCode} ${String(raw).slice(0, 300)}`
+                  )
+                );
+                return;
+              }
               callback(error);
               return;
             }
