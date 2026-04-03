@@ -2062,18 +2062,26 @@ app.get("/diag", (req, res) => {
 /**
  * Depuración Apple OAuth (sin exponer secretos completos).
  * - Activo si APPLE_OAUTH_DEBUG=1, o si ?token= / header x-apple-debug-token coincide con APPLE_DEBUG_TOKEN.
+ * - Si no está activo: 403 + JSON (evita “Cannot GET” confuso si la ruta no coincide en otro host).
  */
-app.get("/api/debug/apple-oauth", (req, res) => {
+function handleAppleOauthDebug(req, res) {
   const q = String(req.query.token || "").trim();
   const h = String(req.headers["x-apple-debug-token"] || "").trim();
   const allowed =
     APPLE_OAUTH_DEBUG ||
     (APPLE_DEBUG_TOKEN && (q === APPLE_DEBUG_TOKEN || h === APPLE_DEBUG_TOKEN));
   if (!allowed) {
-    return res.status(404).json({ error: "not found" });
+    return res.status(403).json({
+      error: "debug_disabled",
+      hint: "En Render añade APPLE_OAUTH_DEBUG=1 (temporal) o APPLE_DEBUG_TOKEN y abre esta URL con ?token=TU_TOKEN",
+      backend_example:
+        "https://medicamentos-backend.onrender.com/api/debug/apple-oauth",
+    });
   }
   res.json(appleOAuthDebugSnapshot());
-});
+}
+app.get("/api/debug/apple-oauth", handleAppleOauthDebug);
+app.get("/debug/apple-oauth", handleAppleOauthDebug);
 
 app.get("/", (_req, res) => {
   res.json({
