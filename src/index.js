@@ -6,6 +6,7 @@ const { Resend } = require("resend");
 const webpush = require("web-push");
 const { execFile } = require("child_process");
 const os = require("os");
+const util = require("util");
 const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
@@ -2195,6 +2196,12 @@ function oauthErrBodyToString(data) {
 /** Intenta extraer mensaje útil si oauthError es string (JSON de Apple) u objeto { data }. */
 function messageFromOAuthInner(o) {
   if (o == null) return null;
+  if (typeof o === "object" && o instanceof String) {
+    return messageFromOAuthInner(String(o));
+  }
+  if (Buffer.isBuffer(o)) {
+    return messageFromOAuthInner(o.toString("utf8"));
+  }
   if (typeof o === "string") {
     const s = o.trim();
     try {
@@ -2218,6 +2225,29 @@ function messageFromOAuthInner(o) {
     }
   }
   return null;
+}
+
+/** Volcado estable para logs (string / Buffer / objeto / boxed String). */
+function oauthErrorInspectForLog(o) {
+  if (o === undefined) return "(undefined)";
+  if (o === null) return "(null)";
+  if (typeof o === "string") {
+    return `string len=${o.length} ${JSON.stringify(o.slice(0, 500))}`;
+  }
+  if (Buffer.isBuffer(o)) {
+    return `buffer ${JSON.stringify(o.toString("utf8").slice(0, 500))}`;
+  }
+  if (typeof o === "object" && o instanceof String) {
+    return `boxed String ${JSON.stringify(String(o).slice(0, 500))}`;
+  }
+  if (typeof o === "object" && o.data != null) {
+    return `data ${JSON.stringify(oauthErrBodyToString(o.data).slice(0, 500))}`;
+  }
+  try {
+    return util.inspect(o, { depth: 3, maxStringLength: 400, breakLength: 120 }).slice(0, 800);
+  } catch (_) {
+    return String(o).slice(0, 400);
+  }
 }
 
 /** Texto para redirect / logs: TokenError, { statusCode, data }, Error anidados en oauthError. */
@@ -2326,17 +2356,9 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
         console.error("[AUTH APPLE] OAuth:", detailMsg);
         try {
           const o = err.oauthError;
-          if (typeof o === "string") {
-            console.error("[AUTH APPLE] oauthError (string):", o.slice(0, 400));
-          } else if (o && typeof o === "object" && o.data != null) {
-            console.error("[AUTH APPLE] diag raw:", oauthErrBodyToString(o.data).slice(0, 400));
-          } else if (o && typeof o === "object") {
-            console.error("[AUTH APPLE] oauthError keys:", Object.keys(o), "msg:", o.message);
-          } else {
-            console.error("[AUTH APPLE] diag:", err.name, o == null ? "sin oauthError" : typeof o);
-          }
-        } catch (_) {
-          /* ignorar */
+          console.error("[AUTH APPLE] oauthError dump:", oauthErrorInspectForLog(o));
+        } catch (e) {
+          console.error("[AUTH APPLE] oauthError dump falló:", e && e.message);
         }
         if (inner?.statusCode) console.error("[AUTH APPLE] HTTP status:", inner.statusCode);
         if (inner?.data) {
