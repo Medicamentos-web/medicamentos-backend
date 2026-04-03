@@ -2192,6 +2192,34 @@ function oauthErrBodyToString(data) {
   return String(data);
 }
 
+/** Intenta extraer mensaje útil si oauthError es string (JSON de Apple) u objeto { data }. */
+function messageFromOAuthInner(o) {
+  if (o == null) return null;
+  if (typeof o === "string") {
+    const s = o.trim();
+    try {
+      const d = JSON.parse(s);
+      if (d && d.error) return `Apple token: ${d.error_description || d.error}`;
+    } catch (_) {
+      if (s.length) return `Apple token: ${s.slice(0, 220)}`;
+    }
+    return null;
+  }
+  if (typeof o === "object" && o.data != null) {
+    try {
+      const raw = oauthErrBodyToString(o.data);
+      const d = JSON.parse(raw);
+      if (d && d.error) return `Apple token: ${d.error_description || d.error}`;
+    } catch (_) {
+      /* seguir */
+    }
+    if (o.statusCode != null) {
+      return `Apple HTTP ${o.statusCode}: ${oauthErrBodyToString(o.data).slice(0, 220)}`;
+    }
+  }
+  return null;
+}
+
 /** Texto para redirect / logs: TokenError, { statusCode, data }, Error anidados en oauthError. */
 function applePassportErrToUserMessage(err) {
   if (!err) return "oauth";
@@ -2199,6 +2227,9 @@ function applePassportErrToUserMessage(err) {
     const m = (err.message && String(err.message).trim()) || err.code;
     return m ? `Apple token: ${m}` : `Apple token: ${err.code || "error"}`;
   }
+
+  const fromInner = messageFromOAuthInner(err.oauthError);
+  if (fromInner) return fromInner;
 
   let inner = err.oauthError;
   let depth = 0;
@@ -2208,7 +2239,12 @@ function applePassportErrToUserMessage(err) {
   }
   if (!inner) inner = err;
 
-  if (inner && inner.data != null) {
+  if (typeof inner === "string") {
+    const m = messageFromOAuthInner(inner);
+    if (m) return m;
+  }
+
+  if (inner && typeof inner === "object" && inner.data != null) {
     try {
       const raw = oauthErrBodyToString(inner.data);
       const d = JSON.parse(raw);
@@ -2222,7 +2258,7 @@ function applePassportErrToUserMessage(err) {
   }
 
   const nestedMsg =
-    err.oauthError && typeof err.oauthError.message === "string"
+    err.oauthError && typeof err.oauthError === "object" && typeof err.oauthError.message === "string"
       ? err.oauthError.message
       : null;
   if (nestedMsg && !nestedMsg.includes("Failed to obtain access token")) {
@@ -2290,10 +2326,14 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
         console.error("[AUTH APPLE] OAuth:", detailMsg);
         try {
           const o = err.oauthError;
-          if (o && o.data != null) {
-            console.error("[AUTH APPLE] diag raw:", oauthErrBodyToString(o.data).slice(0, 240));
+          if (typeof o === "string") {
+            console.error("[AUTH APPLE] oauthError (string):", o.slice(0, 400));
+          } else if (o && typeof o === "object" && o.data != null) {
+            console.error("[AUTH APPLE] diag raw:", oauthErrBodyToString(o.data).slice(0, 400));
+          } else if (o && typeof o === "object") {
+            console.error("[AUTH APPLE] oauthError keys:", Object.keys(o), "msg:", o.message);
           } else {
-            console.error("[AUTH APPLE] diag:", err.name, o ? typeof o : "sin oauthError");
+            console.error("[AUTH APPLE] diag:", err.name, o == null ? "sin oauthError" : typeof o);
           }
         } catch (_) {
           /* ignorar */
