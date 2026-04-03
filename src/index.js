@@ -2109,7 +2109,7 @@ async function findOrCreateOAuthUser(profile, provider) {
       `UPDATE users SET auth_provider = $1, last_login = NOW(), last_ip = $2 WHERE id = $3`,
       [provider, null, user.id]
     );
-    return user;
+    return { user, isNew: false };
   }
 
   const oauthPlaceholder = await bcrypt.hash("oauth_no_password_" + crypto.randomBytes(8).toString("hex"), 10);
@@ -2128,7 +2128,7 @@ async function findOrCreateOAuthUser(profile, provider) {
     [familyId, name, cleanEmail, oauthPlaceholder, provider]
   );
   await pool.query("COMMIT");
-  return userResult.rows[0];
+  return { user: userResult.rows[0], isNew: true };
 }
 
 if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
@@ -2141,7 +2141,10 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
       },
       async (_accessToken, _refreshToken, profile, done) => {
         try {
-          const user = await findOrCreateOAuthUser(profile, "google");
+          const result = await findOrCreateOAuthUser(profile, "google");
+          if (!result) return done(null, false);
+          const { user, isNew } = result;
+          if (user) user._oauthIsNew = isNew;
           done(null, user);
         } catch (err) {
           done(err, null);
@@ -2159,6 +2162,7 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
     (req, res) => {
       const user = req.user;
       if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
+      maybeSendOAuthWelcome(user, "google");
       const token = signToken(user);
       res.cookie(TOKEN_NAME, token, cookieOpts(req));
       const sep = FRONTEND_URL.includes("?") ? "&" : "?";
@@ -2198,7 +2202,10 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
             emails: [{ value: String(email).trim().toLowerCase() }],
             displayName,
           };
-          const user = await findOrCreateOAuthUser(syntheticProfile, "apple");
+          const result = await findOrCreateOAuthUser(syntheticProfile, "apple");
+          if (!result) return done(null, false);
+          const { user, isNew } = result;
+          if (user) user._oauthIsNew = isNew;
           done(null, user || false);
         } catch (err) {
           done(err, null);
@@ -2213,6 +2220,7 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
     (req, res) => {
       const user = req.user;
       if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
+      maybeSendOAuthWelcome(user, "apple");
       const token = signToken(user);
       res.cookie(TOKEN_NAME, token, cookieOpts(req));
       const sep = FRONTEND_URL.includes("?") ? "&" : "?";
@@ -2415,6 +2423,72 @@ async function sendWelcomeEmail(email, tempPassword, context = {}) {
     } catch (adminErr) { console.error("[SEND WELCOME] No se pudo notificar al admin:", adminErr.message); }
   }
   return false;
+}
+
+/** Email tras primer registro OAuth (Google/Apple): sin contraseña temporal; enlaces y Family ID. */
+async function sendOAuthWelcomeEmail(email, context = {}) {
+  if (!mailTransport || !email) return false;
+  const { name, familyId, provider } = context;
+  const providerLabel =
+    provider === "apple" ? "Apple" : provider === "google" ? "Google" : "OAuth";
+  const FRONTEND = process.env.FRONTEND_URL || "https://medicamentos-frontend.vercel.app";
+  const GUIDE_BASE = process.env.GUIDE_BASE_URL || FRONTEND;
+  const pdfDe = `${GUIDE_BASE}/guides/MediControl_Guide_DE.pdf`;
+  const pdfEs = `${GUIDE_BASE}/guides/MediControl_Guide_ES.pdf`;
+  const pdfEn = `${GUIDE_BASE}/guides/MediControl_Guide_EN.pdf`;
+  const html = `
+    <p>Hola${name ? ` ${escapeHtml(name)}` : ""},</p>
+    <p>Tu cuenta en <strong>MediControl</strong> se ha creado con inicio de sesión mediante <strong>${escapeHtml(providerLabel)}</strong>.</p>
+    <p>Para entrar en el futuro usa el mismo botón <strong>${escapeHtml(providerLabel)}</strong> en la pantalla de acceso (no necesitas contraseña de MediControl para ese método).</p>
+    ${familyId ? `<p><strong>Family ID:</strong> ${familyId}</p>` : ""}
+    <p>Abre la app: <a href="${FRONTEND}">${FRONTEND}</a></p>
+    <p style="margin-top:16px;"><strong>Guías de ayuda en PDF:</strong><br>
+      <a href="${pdfDe}">Deutsch</a> · <a href="${pdfEs}">Español</a> · <a href="${pdfEn}">English</a>
+    </p>`;
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 2000;
+  let lastError = null;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await mailTransport.sendMail({
+        from: SMTP_USER,
+        to: email,
+        subject: "Bienvenida a MediControl",
+        html,
+      });
+      return true;
+    } catch (e) {
+      lastError = e;
+      console.error(`[SEND OAUTH WELCOME] Intento ${attempt}/${MAX_RETRIES} fallido:`, e.message);
+      if (attempt < MAX_RETRIES) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    }
+  }
+  if (ADMIN_EMAIL) {
+    try {
+      await mailTransport.sendMail({
+        from: SMTP_USER,
+        to: ADMIN_EMAIL,
+        subject: `[MediControl] Error: Email de bienvenida OAuth NO enviado a ${email}`,
+        html: `<p><strong>No se pudo enviar el email de bienvenida OAuth</strong> tras ${MAX_RETRIES} intentos.</p>
+          <p><strong>Email:</strong> ${escapeHtml(email)}${name ? `<br><strong>Nombre:</strong> ${escapeHtml(name)}` : ""}${familyId ? `<br><strong>Family ID:</strong> ${familyId}` : ""}<br><strong>Proveedor:</strong> ${escapeHtml(providerLabel)}</p>
+          <p><strong>Error:</strong> ${escapeHtml(lastError?.message || "Desconocido")}</p>`,
+      });
+    } catch (adminErr) {
+      console.error("[SEND OAUTH WELCOME] No se pudo notificar al admin:", adminErr.message);
+    }
+  }
+  return false;
+}
+
+function maybeSendOAuthWelcome(user, provider) {
+  if (!user || !user._oauthIsNew) return;
+  delete user._oauthIsNew;
+  const email = user.email;
+  const name = user.name;
+  const familyId = user.family_id;
+  sendOAuthWelcomeEmail(email, { name, familyId, provider }).catch((e) =>
+    console.error("[OAUTH] sendOAuthWelcomeEmail:", e.message)
+  );
 }
 
 // =============================================================================
