@@ -18,6 +18,7 @@ const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const AppleStrategy = require("passport-apple");
 const { patchAppleOAuthAccessToken } = require("./apple-oauth-fix");
+const { recordAppleOAuthEvent, getAppleOAuthTraceDebug } = require("./apple-oauth-events");
 const pg = require("pg");
 const { Pool } = pg;
 // Fix: devolver DATE (oid 1082) como string "YYYY-MM-DD" en vez de objeto Date
@@ -159,6 +160,9 @@ function appleOAuthDebugSnapshot() {
       invalid_client_typically:
         "Service ID ≠ APPLE_SERVICE_ID, Return URL distinto, o Team/Key/.p8 no corresponden a la clave",
     },
+    oauth_trace: getAppleOAuthTraceDebug(),
+    oauth_trace_hint:
+      "Después de un intento de login con Apple, recarga esta página: oauth_trace.last_events y last_failure_hint muestran el flujo (memoria del proceso; se pierde si Render reinicia el servicio).",
   };
 }
 
@@ -2461,7 +2465,10 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
     async (req, _accessToken, _refreshToken, idToken, _profile, done) => {
       try {
         const payload = jwt.decode(idToken);
-        if (!payload?.sub) return done(null, false);
+        if (!payload?.sub) {
+          recordAppleOAuthEvent("verify_no_sub", "id_token sin sub");
+          return done(null, false);
+        }
         const sub = String(payload.sub);
         const emailFromToken =
           payload.email && String(payload.email).includes("@")
@@ -2495,7 +2502,10 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
             displayName,
           };
           const result = await findOrCreateOAuthUser(syntheticProfile, "apple");
-          if (!result) return done(null, false);
+          if (!result) {
+            recordAppleOAuthEvent("find_or_create_null", "findOrCreateOAuthUser devolvió null");
+            return done(null, false);
+          }
           const { user, isNew } = result;
           await pool.query(`UPDATE users SET apple_sub = $1 WHERE id = $2`, [sub, user.id]);
           user._oauthIsNew = isNew;
@@ -2503,6 +2513,10 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
         }
 
         // 3) Sin email y sin fila con este sub (p. ej. cuenta Apple creada antes de apple_sub): no podemos enlazar.
+        recordAppleOAuthEvent(
+          "verify_no_email_no_sub",
+          "sin email en JWT y sin fila apple_sub para este sub"
+        );
         return done(
           new Error(
             "Apple no envió el email en este inicio. En el iPhone: Ajustes → Apple ID → Inicio de sesión con Apple → MediControl → Dejar de usar → vuelve a entrar con Apple y elige compartir email."
@@ -2510,6 +2524,7 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
           null
         );
       } catch (err) {
+        recordAppleOAuthEvent("verify_exception", err && err.message ? err.message : String(err));
         done(err, null);
       }
     }
@@ -2524,6 +2539,10 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
   app.get(
     "/auth/apple",
     (req, res, next) => {
+      recordAppleOAuthEvent(
+        "authorize_start",
+        `host=${req.get("host")} referer=${req.get("referer") || "-"}`
+      );
       if (APPLE_OAUTH_DEBUG) {
         console.log("[AUTH APPLE DEBUG] GET /auth/apple", {
           host: req.get("host"),
@@ -2548,10 +2567,18 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
         contentType: req.get("content-type"),
       });
     }
+    {
+      const b = req.body || {};
+      recordAppleOAuthEvent(
+        "callback_post",
+        `code=${!!b.code} state=${!!b.state} id_token=${!!b.id_token} user=${!!b.user} keys=${typeof b === "object" && b && !Array.isArray(b) ? Object.keys(b).join(",") : "-"}`
+      );
+    }
     passport.authenticate("apple", { session: false }, (err, user, _info) => {
       if (err) {
         const inner = err.oauthError || err;
         const detailMsg = applePassportErrToUserMessage(err);
+        recordAppleOAuthEvent("passport_error", detailMsg);
         console.error("[AUTH APPLE] OAuth:", detailMsg);
         try {
           const o = err.oauthError;
@@ -2572,7 +2599,11 @@ if (APPLE_SERVICE_ID && APPLE_TEAM_ID && APPLE_KEY_ID && APPLE_PRIVATE_KEY) {
         const sep = FRONTEND_URL.includes("?") ? "&" : "?";
         return res.redirect(`${FRONTEND_URL}${sep}error=apple_oauth&reason=${reason}`);
       }
-      if (!user) return res.redirect(FRONTEND_URL + "?error=oauth_failed");
+      if (!user) {
+        recordAppleOAuthEvent("oauth_no_user", "passport returned no user (oauth_failed)");
+        return res.redirect(FRONTEND_URL + "?error=oauth_failed");
+      }
+      recordAppleOAuthEvent("oauth_success", `user_id=${user.id} isNew=${!!user._oauthIsNew}`);
       req.user = user;
       next();
     })(req, res, next);
