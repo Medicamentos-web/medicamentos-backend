@@ -484,6 +484,16 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 const upload = multer({ dest: uploadDir });
+
+/** Estado de importaciones PDF en curso (progreso para la UI). */
+const importPdfJobs = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, j] of importPdfJobs.entries()) {
+    if (now - (j.createdAt || 0) > 20 * 60 * 1000) importPdfJobs.delete(id);
+  }
+}, 5 * 60 * 1000);
+
 const medicalRecordsDir = path.join("/data/imports", "medical_records");
 if (!fs.existsSync(medicalRecordsDir)) {
   fs.mkdirSync(medicalRecordsDir, { recursive: true });
@@ -1917,27 +1927,59 @@ function buildUserName(name, firstName, lastName) {
   return parts.length ? parts.join(" ").trim() : "";
 }
 
-async function importMedsFromPdf(filePath, familyId, userId, useOcr = false, skipNameCheck = false) {
+async function importMedsFromPdf(
+  filePath,
+  familyId,
+  userId,
+  useOcr = false,
+  skipNameCheck = false,
+  onProgress = null
+) {
+  const startTime = Date.now();
+  const emit = (pct, phase, detail = "") => {
+    if (typeof onProgress !== "function") return;
+    const elapsed = Date.now() - startTime;
+    let etaSeconds = null;
+    if (pct > 2 && pct < 100) {
+      const estimatedTotalMs = (elapsed / pct) * 100;
+      etaSeconds = Math.max(0, Math.round((estimatedTotalMs - elapsed) / 1000));
+    }
+    onProgress({
+      percent: Math.min(100, Math.round(pct)),
+      phase,
+      detail: detail || "",
+      etaSeconds,
+    });
+  };
+
+  emit(2, "Leyendo archivo PDF");
   const pdfParse = require("pdf-parse");
   const buffer = fs.readFileSync(filePath);
+  emit(6, "Analizando PDF");
   const pdf = await pdfParse(buffer);
   let text = pdf.text;
   let ocrUsed = false;
   console.log(`[IMPORT PDF] pdf-parse text length: ${(text || "").length}`);
+  emit(12, "Texto del PDF extraído", `${(text || "").trim().length} caracteres`);
   // Auto-fallback to OCR if pdf-parse gets little/no text
   if (useOcr || !text || text.trim().length < 50) {
     try {
+      emit(16, "OCR en curso", "Puede tardar 1–3 minutos en PDFs escaneados");
       text = await runOcrOnPdf(filePath, "deu+eng");
       ocrUsed = true;
       console.log(`[IMPORT PDF] OCR text length: ${(text || "").length}`);
+      emit(38, "OCR completado", `${(text || "").length} caracteres`);
     } catch (ocrErr) {
       console.error(`[IMPORT PDF] OCR failed:`, ocrErr.message);
       if (!text || text.trim().length < 10) {
         throw new Error("No se pudo extraer texto del PDF. OCR falló: " + ocrErr.message);
       }
     }
+  } else {
+    emit(32, "OCR no necesario");
   }
   const rawText = (text || "").slice(0, 2000);
+  emit(40, "Validando paciente en el documento");
   if (!skipNameCheck) {
     const userResult = await pool.query(
       `SELECT id, name, first_name, last_name FROM users WHERE id = $1 AND family_id = $2`,
@@ -1948,6 +1990,7 @@ async function importMedsFromPdf(filePath, familyId, userId, useOcr = false, ski
       throw new Error("Nombre de paciente no coincide o no se encontró en la receta.");
     }
   }
+  emit(43, "Extrayendo líneas de medicamentos");
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -2000,11 +2043,20 @@ async function importMedsFromPdf(filePath, familyId, userId, useOcr = false, ski
     [familyId, userId || null, filePath || null]
   );
   const batchId = batchResult.rows[0].id;
+  emit(45, "Importando medicamentos a la base de datos");
 
   let inserted = 0;
   let warnings = 0;
   const defaultStart = process.env.DEFAULT_SCHEDULE_START_DATE || null;
-  for (const line of lines) {
+  const lineCount = Math.max(lines.length, 1);
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const pctLine = 45 + ((li + 1) / lineCount) * 53;
+    emit(
+      pctLine,
+      `Procesando línea ${li + 1} de ${lines.length}`,
+      line.length > 80 ? `${line.slice(0, 80)}…` : line
+    );
     if (line.startsWith("--")) continue;
     const name = extractName(line);
     if (!name || name.length < 3) continue;
@@ -2063,9 +2115,114 @@ async function importMedsFromPdf(filePath, familyId, userId, useOcr = false, ski
     }
     inserted += 1;
   }
+  emit(100, "Importación finalizada", `${inserted} medicamento(s)`);
   console.log(`[IMPORT PDF] Resultado: ${inserted} medicamentos, ${warnings} advertencias, ${lines.length} líneas procesadas`);
   return { inserted, warnings, batchId, rawText, ocrUsed, linesProcessed: lines.length };
 }
+
+app.post(
+  "/api/admin/import-pdf",
+  requireAuth,
+  (req, res, next) => {
+    if (!["admin", "superuser"].includes(req.user.role)) {
+      return res.status(403).json({ error: "sin permisos" });
+    }
+    next();
+  },
+  upload.single("file"),
+  async (req, res) => {
+    const filePath = req.file?.path || req.body?.file_path;
+    const userId = Number(req.body?.user_id || req.user.sub);
+    const useOcr = req.body?.use_ocr === "1";
+    const skipNameCheck = req.body?.skip_name_check === "1";
+    if (!filePath || !Number.isFinite(userId)) {
+      return res.status(400).json({ error: "Archivo y paciente son obligatorios" });
+    }
+    const resolved = await resolveImportFamilyId(req, userId);
+    if (!resolved.ok || resolved.familyId == null) {
+      return res.status(400).json({ error: "Paciente no válido para tu cuenta" });
+    }
+    const jobId = crypto.randomBytes(16).toString("hex");
+    importPdfJobs.set(jobId, {
+      userId: String(req.user.sub),
+      createdAt: Date.now(),
+      percent: 0,
+      phase: "Iniciando",
+      detail: "",
+      etaSeconds: null,
+      done: false,
+      success: null,
+      result: null,
+      error: null,
+    });
+    const familyId = resolved.familyId;
+    const filePathCopy = filePath;
+    (async () => {
+      try {
+        const onProgress = (ev) => {
+          const cur = importPdfJobs.get(jobId) || {};
+          importPdfJobs.set(jobId, {
+            ...cur,
+            percent: ev.percent,
+            phase: ev.phase,
+            detail: ev.detail,
+            etaSeconds: ev.etaSeconds,
+            done: false,
+          });
+        };
+        const result = await importMedsFromPdf(
+          filePathCopy,
+          familyId,
+          userId,
+          useOcr,
+          skipNameCheck,
+          onProgress
+        );
+        importPdfJobs.set(jobId, {
+          ...importPdfJobs.get(jobId),
+          percent: 100,
+          phase: "Completado",
+          detail: "",
+          etaSeconds: null,
+          done: true,
+          success: true,
+          result,
+        });
+      } catch (err) {
+        importPdfJobs.set(jobId, {
+          ...importPdfJobs.get(jobId),
+          done: true,
+          success: false,
+          error: err.message || String(err),
+          percent: 100,
+          phase: "Error",
+        });
+      } finally {
+        try {
+          fs.unlinkSync(filePathCopy);
+        } catch (_) {}
+      }
+    })();
+    res.json({ jobId });
+  }
+);
+
+app.get("/api/admin/import-pdf/status/:jobId", requireAuth, (req, res) => {
+  const job = importPdfJobs.get(req.params.jobId);
+  if (!job || job.userId !== String(req.user.sub)) {
+    return res.status(404).json({ error: "job no encontrado" });
+  }
+  res.json({
+    done: job.done,
+    percent: job.percent ?? 0,
+    phase: job.phase || "",
+    detail: job.detail || "",
+    etaSeconds: job.etaSeconds,
+    success: job.success,
+    result: job.result,
+    error: job.error,
+  });
+});
 
 function requireRole(roles) {
   return (req, res, next) => {
@@ -10259,6 +10416,13 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
       .note { font-size:12px; color:#64748b; margin-top:8px; }
       .danger { background:#ef4444; }
       .row { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+      .imp-bar-wrap { background:#e2e8f0; border-radius:999px; height:14px; overflow:hidden; margin:12px 0; }
+      .imp-bar { height:100%; background:linear-gradient(90deg,#2563eb,#14b8a6); border-radius:999px; width:0%; transition:width .25s ease; }
+      .imp-meta { font-size:12px; color:#64748b; margin-top:8px; line-height:1.5; }
+      .imp-result-ok { background:#ecfdf5; border:1px solid #6ee7b7; border-radius:14px; padding:16px; margin-top:14px; }
+      .imp-result-err { background:#fef2f2; border:1px solid #fecaca; border-radius:14px; padding:16px; margin-top:14px; }
+      a.imp-link { display:inline-block; margin:12px 12px 0 0; padding:10px 16px; border-radius:12px; border:1px solid #e2e8f0; color:#0f172a; font-weight:600; text-decoration:none; font-size:13px; }
+      a.imp-link:hover { background:#f8fafc; }
     </style>
     <div class="wrap">
       <header>
@@ -10291,9 +10455,9 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
       }
       <div class="card">
         <h1>Importar desde PDF</h1>
-        <form method="POST" action="/admin/import" enctype="multipart/form-data">
+        <form id="importPdfForm" method="POST" action="/admin/import" enctype="multipart/form-data">
           <label>Archivo PDF (desde tu PC)</label>
-          <input name="file" type="file" accept=".pdf" />
+          <input name="file" type="file" accept=".pdf" required />
           <label>Ruta del archivo (dentro del contenedor)</label>
           <input name="file_path" value="" />
           <div class="row">
@@ -10316,8 +10480,99 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
               <input name="skip_name_check" type="checkbox" value="1" />
             </div>
           </div>
-          <button type="submit">⬆ Importar</button>
+          <button type="submit" id="importPdfBtn">⬆ Importar</button>
         </form>
+        <p class="note">Sin JavaScript, el envío usa el modo clásico (sin barra de progreso).</p>
+        <div id="importPdfProgress" style="display:none; margin-top:16px;">
+          <h2 style="font-size:15px; margin:0 0 8px;">Importando…</h2>
+          <div class="imp-bar-wrap"><div class="imp-bar" id="importPdfBar"></div></div>
+          <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px;">
+            <span id="importPdfPct" style="font-size:20px; font-weight:700; color:#0f172a;">0%</span>
+            <span id="importPdfEta" style="font-size:12px; color:#64748b;"></span>
+          </div>
+          <p id="importPdfPhase" class="imp-meta" style="font-weight:600; color:#334155;"></p>
+          <p id="importPdfDetail" class="imp-meta" style="font-size:11px; word-break:break-word;"></p>
+        </div>
+        <div id="importPdfResult"></div>
+        <script>
+        (function(){
+          var form = document.getElementById("importPdfForm");
+          if (!form) return;
+          form.addEventListener("submit", function(ev){
+            ev.preventDefault();
+            var fileIn = form.querySelector('input[name="file"]');
+            if (!fileIn || !fileIn.files || !fileIn.files.length) { alert("Selecciona un archivo PDF."); return; }
+            var fd = new FormData(form);
+            var btn = document.getElementById("importPdfBtn");
+            var progress = document.getElementById("importPdfProgress");
+            var bar = document.getElementById("importPdfBar");
+            var pctEl = document.getElementById("importPdfPct");
+            var etaEl = document.getElementById("importPdfEta");
+            var phaseEl = document.getElementById("importPdfPhase");
+            var detailEl = document.getElementById("importPdfDetail");
+            var resultEl = document.getElementById("importPdfResult");
+            resultEl.innerHTML = "";
+            progress.style.display = "block";
+            btn.disabled = true;
+            bar.style.width = "0%";
+            pctEl.textContent = "0%";
+            etaEl.textContent = "";
+            phaseEl.textContent = "Iniciando…";
+            detailEl.textContent = "";
+            fetch("/api/admin/import-pdf", { method: "POST", body: fd, credentials: "same-origin" })
+              .then(function(r){ if (!r.ok) return r.json().then(function(j){ throw new Error(j.error || "Error"); }); return r.json(); })
+              .then(function(data){
+                if (!data.jobId) throw new Error("Sin jobId");
+                var poll = setInterval(function(){
+                  fetch("/api/admin/import-pdf/status/" + encodeURIComponent(data.jobId), { credentials: "same-origin" })
+                    .then(function(r){
+                      if (!r.ok) return r.json().then(function(j){ throw new Error(j.error || "No se pudo leer el estado"); });
+                      return r.json();
+                    })
+                    .then(function(st){
+                      var p = st.percent != null ? st.percent : 0;
+                      bar.style.width = Math.min(100, p) + "%";
+                      pctEl.textContent = Math.min(100, p) + "%";
+                      phaseEl.textContent = st.phase || "";
+                      detailEl.textContent = st.detail || "";
+                      if (st.etaSeconds != null && st.etaSeconds > 0 && !st.done) {
+                        etaEl.textContent = "Tiempo restante estimado: ~" + st.etaSeconds + " s";
+                      } else if (st.done) { etaEl.textContent = ""; }
+                      if (st.done) {
+                        clearInterval(poll);
+                        progress.style.display = "none";
+                        btn.disabled = false;
+                        if (st.success && st.result) {
+                          var r = st.result;
+                          var ok = (r.inserted || 0) > 0;
+                          var html = '<div class="imp-result-' + (ok ? "ok" : "err") + '">' +
+                            '<h2 style="margin:0 0 8px; font-size:14px;">' + (ok ? "Importación completada sin errores" : "Importación sin medicamentos nuevos") + '</h2>' +
+                            '<p style="margin:0; font-size:13px; color:#334155;"><strong>' + (r.inserted || 0) + '</strong> medicamentos · <strong>' + (r.warnings || 0) + '</strong> advertencias · OCR: ' + (r.ocrUsed ? "Sí" : "No") + '</p>' +
+                            (ok ? '<p style="margin:12px 0 0;"><a class="imp-link" href="/admin/meds-list?review=1">Revisar posibles errores</a>' +
+                            '<a class="imp-link" href="/admin/import">Otra importación</a></p>' : '<p style="margin:12px 0 0;"><a class="imp-link" href="/admin/import">Probar otra importación</a></p>') +
+                            '</div>';
+                          resultEl.innerHTML = html;
+                        } else {
+                          resultEl.innerHTML = '<div class="imp-result-err"><h2 style="margin:0 0 8px; font-size:14px;">Error en la importación</h2><p style="margin:0;">' + (st.error || "Error desconocido") + '</p><p style="margin:12px 0 0;"><a class="imp-link" href="/admin/import">Volver</a></p></div>';
+                        }
+                      }
+                    })
+                    .catch(function(err){
+                      clearInterval(poll);
+                      btn.disabled = false;
+                      progress.style.display = "none";
+                      resultEl.innerHTML = '<div class="imp-result-err"><p>' + (err && err.message ? err.message : "Error de red") + '</p></div>';
+                    });
+                }, 400);
+              })
+              .catch(function(err){
+                progress.style.display = "none";
+                btn.disabled = false;
+                resultEl.innerHTML = '<div class="imp-result-err"><p>' + (err && err.message ? err.message : "Error") + '</p></div>';
+              });
+          });
+        })();
+        </script>
         <p class="note">Los horarios se asignan a 08:00 / 14:00 / 20:00 / 22:00 según columnas Mo/Mi/Ab/Na.</p>
         <p class="note">Si subes archivo, la ruta interna no es necesaria.</p>
         <p class="note"><a href="/admin/import-scan">📷 Escanear desde foto (imagen)</a></p>
