@@ -1159,18 +1159,32 @@ function sortPngPageFiles(names) {
 }
 
 /**
- * OCR de PDF: más rápido que antes por
- * - render ~120 DPI (env OCR_RENDER_DPI, rango 72–200)
- * - tesseract --oem 1 --psm 6 (rápido; env OCR_TESSERACT_PSM para ajustar)
- * - varias páginas en paralelo (env OCR_PAGE_CONCURRENCY, por defecto 3)
- * - límite opcional de páginas (env OCR_MAX_PAGES, por defecto todas)
+ * Páginas a rasterizar/OCR. Por defecto 6 (recetas suelen ser cortas).
+ * Env: OCR_MAX_PAGES=all|0|999 → todo el PDF; número → máximo de páginas.
+ */
+function parseOcrMaxPages() {
+  const v = process.env.OCR_MAX_PAGES;
+  if (v === undefined || v === "") return 6;
+  const s = String(v).trim().toLowerCase();
+  if (s === "0" || s === "all" || s === "999" || s === "full") return 999;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(999, n) : 6;
+}
+
+/**
+ * OCR de PDF:
+ * - pdftoppm solo páginas 1..N (no rasteriza el PDF entero) → mucho más rápido en documentos largos
+ * - ~100 DPI por defecto (env OCR_RENDER_DPI)
+ * - tesseract --oem 1 --psm 6; paralelo (OCR_PAGE_CONCURRENCY, default 4)
  */
 function runOcrOnPdf(filePath, lang = "deu") {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "med-ocr-"));
   const prefix = path.join(tmpDir, "page");
-  const dpi = Math.min(200, Math.max(72, Number(process.env.OCR_RENDER_DPI || 120)));
-  const maxPages = Math.max(1, parseInt(process.env.OCR_MAX_PAGES || "0", 10) || 999);
-  const concurrency = Math.min(8, Math.max(1, parseInt(process.env.OCR_PAGE_CONCURRENCY || "3", 10)));
+  const dpi = Math.min(200, Math.max(72, Number(process.env.OCR_RENDER_DPI || 100)));
+  const maxPages = parseOcrMaxPages();
+  const unlimited = maxPages >= 999;
+  const pageSpan = unlimited ? null : maxPages;
+  const concurrency = Math.min(8, Math.max(1, parseInt(process.env.OCR_PAGE_CONCURRENCY || "4", 10)));
   const psm = String(process.env.OCR_TESSERACT_PSM || "6").replace(/\D/g, "") || "6";
 
   const cleanup = () => {
@@ -1189,8 +1203,18 @@ function runOcrOnPdf(filePath, lang = "deu") {
       );
     });
 
+  const pdftoppmArgs = ["-png", "-r", String(dpi)];
+  if (pageSpan != null) {
+    pdftoppmArgs.push("-f", "1", "-l", String(pageSpan));
+  }
+  pdftoppmArgs.push(filePath, prefix);
+
+  if (pageSpan != null) {
+    console.log(`[OCR] pdftoppm páginas 1–${pageSpan}, ${dpi} DPI (ajusta OCR_MAX_PAGES o pon all)`);
+  }
+
   return new Promise((resolve, reject) => {
-    execFile("pdftoppm", ["-png", "-r", String(dpi), filePath, prefix], async (err) => {
+    execFile("pdftoppm", pdftoppmArgs, async (err) => {
       if (err) {
         cleanup();
         return reject(err);
@@ -1198,8 +1222,8 @@ function runOcrOnPdf(filePath, lang = "deu") {
       try {
         let names = fs.readdirSync(tmpDir).filter((f) => f.endsWith(".png"));
         names = sortPngPageFiles(names);
-        if (names.length > maxPages) {
-          console.warn(`[OCR] PDF con ${names.length} páginas; OCR solo en las primeras ${maxPages} (OCR_MAX_PAGES)`);
+        if (!unlimited && names.length > maxPages) {
+          console.warn(`[OCR] recorte a ${maxPages} páginas`);
           names = names.slice(0, maxPages);
         }
         const files = names.map((f) => path.join(tmpDir, f));
@@ -10557,8 +10581,8 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
               </select>
             </div>
             <div>
-              <label>Modo OCR (recomendado para PDFs escaneados)</label>
-              <input name="use_ocr" type="checkbox" value="1" checked />
+              <label>Modo OCR (solo si la receta es escaneo/foto en PDF; si tiene texto, déjalo desmarcado — va más rápido)</label>
+              <input name="use_ocr" type="checkbox" value="1" />
             </div>
             <div>
               <label>Omitir verificación de nombre</label>
