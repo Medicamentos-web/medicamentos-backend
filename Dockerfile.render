@@ -7,7 +7,7 @@ FROM node:20-alpine
 WORKDIR /app
 
 # Dependencias del sistema para OCR e importación PDF
-RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-deu tesseract-ocr-data-eng poppler-utils
+RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-deu tesseract-ocr-data-eng poppler-utils ghostscript
 
 # Instalar dependencias (cacheado si no cambia package.json)
 COPY package.json package-lock.json* ./

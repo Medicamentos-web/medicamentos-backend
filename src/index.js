@@ -1172,6 +1172,79 @@ function parseOcrMaxPages() {
 }
 
 /**
+ * Antes del OCR: comprimir con Ghostscript (recompone imágenes → menos datos → pdftoppm/tesseract más rápidos).
+ * Fallback: recortar a las primeras N páginas con pdf-lib si gs no está o falla.
+ */
+async function preparePdfForOcr(inputPath) {
+  const maxPages = parseOcrMaxPages();
+  const unlimited = maxPages >= 999;
+  const outPath = path.join(os.tmpdir(), `med-ocrprep-${crypto.randomBytes(12).toString("hex")}.pdf`);
+  const gsTimeout = Math.max(60_000, Math.min(900_000, parseInt(process.env.OCR_GS_TIMEOUT_MS || "300000", 10) || 300000));
+  let pdfSettings = String(process.env.OCR_GS_PDFSETTINGS || "/ebook").trim();
+  pdfSettings = pdfSettings.replace(/[^a-zA-Z0-9/_-]/g, "") || "ebook";
+  if (!pdfSettings.startsWith("/")) pdfSettings = "/" + pdfSettings;
+
+  const gsArgs = [
+    "-sDEVICE=pdfwrite",
+    "-dCompatibilityLevel=1.4",
+    `-dPDFSETTINGS=${pdfSettings}`,
+    "-dNOPAUSE",
+    "-dBATCH",
+    "-dQUIET",
+    "-dSAFER",
+    `-sOutputFile=${outPath}`,
+  ];
+  if (!unlimited) {
+    gsArgs.push("-dFirstPage=1", `-dLastPage=${maxPages}`);
+  }
+  gsArgs.push("-f", inputPath);
+
+  try {
+    await new Promise((resolve, reject) => {
+      execFile("gs", gsArgs, { timeout: gsTimeout, maxBuffer: 50 * 1024 * 1024 }, (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 100) {
+      const orig = fs.statSync(inputPath).size;
+      const nw = fs.statSync(outPath).size;
+      console.log(`[OCR] Ghostscript: ${(orig / 1024).toFixed(0)} KB → ${(nw / 1024).toFixed(0)} KB`);
+      return { path: outPath, cleanup: outPath };
+    }
+  } catch (e) {
+    console.warn("[OCR] Ghostscript no disponible o falló:", e.message);
+    try {
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    } catch (_) {}
+  }
+
+  try {
+    const { PDFDocument } = require("pdf-lib");
+    const bytes = fs.readFileSync(inputPath);
+    const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const n = doc.getPageCount();
+    if (!unlimited && n > maxPages) {
+      const out = await PDFDocument.create();
+      const idx = Array.from({ length: maxPages }, (_, i) => i);
+      const copied = await out.copyPages(doc, idx);
+      copied.forEach((p) => out.addPage(p));
+      const buf = Buffer.from(await out.save());
+      fs.writeFileSync(outPath, buf);
+      console.log(`[OCR] pdf-lib: recortado ${n} páginas → ${maxPages}`);
+      return { path: outPath, cleanup: outPath };
+    }
+  } catch (e) {
+    console.warn("[OCR] pdf-lib:", e.message);
+    try {
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    } catch (_) {}
+  }
+
+  return { path: inputPath, cleanup: null };
+}
+
+/**
  * OCR de PDF:
  * - pdftoppm solo páginas 1..N (no rasteriza el PDF entero) → mucho más rápido en documentos largos
  * - ~100 DPI por defecto (env OCR_RENDER_DPI)
@@ -2051,7 +2124,14 @@ async function importMedsFromPdf(
   // Solo OCR si el usuario lo pidió. Antes se hacía OCR automático con poco texto → siempre lento en escaneos.
   if (useOcr) {
     let ocrHeartbeat = null;
+    let ocrPdfCleanup = null;
+    let ocrTimeoutId;
     try {
+      emit(14, "Optimizando PDF", "Comprimiendo para acelerar el OCR (Ghostscript)…");
+      const prep = await preparePdfForOcr(filePath);
+      ocrPdfCleanup = prep.cleanup;
+      const ocrPath = prep.path;
+
       emit(16, "OCR en curso", "Puede tardar varios minutos en PDFs escaneados");
       const ocrStart = Date.now();
       ocrHeartbeat = setInterval(() => {
@@ -2069,24 +2149,43 @@ async function importMedsFromPdf(
             : `Llevamos ${mm} min ${ss}s — sigue en curso; no cierres la pestaña`
         );
       }, 2500);
-      const OCR_MAX_MS = 28 * 60 * 1000;
-      let ocrTimeoutId;
+      const OCR_MAX_MS = Math.max(
+        5 * 60 * 1000,
+        parseInt(process.env.OCR_TIMEOUT_MS || String(45 * 60 * 1000), 10) || 45 * 60 * 1000
+      );
+      const ocrTimeoutMin = Math.round(OCR_MAX_MS / 60000);
       const ocrTimeoutPromise = new Promise((_, rej) => {
         ocrTimeoutId = setTimeout(
-          () => rej(new Error("OCR superó el tiempo máximo (28 min). Prueba un PDF más pequeño o sin OCR.")),
+          () =>
+            rej(
+              new Error(
+                `OCR superó el tiempo máximo (${ocrTimeoutMin} min). Prueba un PDF más pequeño, OCR_GS_PDFSETTINGS=/screen en el servidor, u OCR_MAX_PAGES=4.`
+              )
+            ),
           OCR_MAX_MS
         );
       });
       try {
-        text = await Promise.race([runOcrOnPdf(filePath, "deu+eng"), ocrTimeoutPromise]);
+        text = await Promise.race([runOcrOnPdf(ocrPath, "deu+eng"), ocrTimeoutPromise]);
       } finally {
         if (ocrTimeoutId) clearTimeout(ocrTimeoutId);
+        if (ocrPdfCleanup) {
+          try {
+            fs.unlinkSync(ocrPdfCleanup);
+          } catch (_) {}
+          ocrPdfCleanup = null;
+        }
       }
       ocrUsed = true;
       console.log(`[IMPORT PDF] OCR text length: ${(text || "").length}`);
       emit(38, "OCR completado", `${(text || "").length} caracteres`);
     } catch (ocrErr) {
       console.error(`[IMPORT PDF] OCR failed:`, ocrErr.message);
+      if (ocrPdfCleanup) {
+        try {
+          fs.unlinkSync(ocrPdfCleanup);
+        } catch (_) {}
+      }
       if (!text || text.trim().length < 10) {
         throw new Error("No se pudo extraer texto del PDF. OCR falló: " + ocrErr.message);
       }
