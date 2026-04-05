@@ -1653,6 +1653,24 @@ function safeAdminReturnPath(p) {
   return t.split("?")[0];
 }
 
+/** Importar / reset meds: admin usa la familia del paciente elegido; el resto solo la suya. */
+async function resolveImportFamilyId(req, userId) {
+  const uid = Number(userId);
+  if (!Number.isFinite(uid)) return { ok: false, familyId: null };
+  if (req.user.role === "admin") {
+    const r = await pool.query(`SELECT family_id FROM users WHERE id = $1`, [uid]);
+    if (r.rows[0]?.family_id == null) return { ok: false, familyId: null };
+    return { ok: true, familyId: r.rows[0].family_id };
+  }
+  const myFamily = req.user.family_id;
+  const r = await pool.query(`SELECT family_id FROM users WHERE id = $1 AND family_id = $2`, [
+    uid,
+    myFamily,
+  ]);
+  if (!r.rows[0]) return { ok: false, familyId: null };
+  return { ok: true, familyId: r.rows[0].family_id };
+}
+
 function renderShell(req, title, active, content) {
   // Si no hay sesión, renderizar layout mínimo (solo login)
   if (!req.user) {
@@ -9747,10 +9765,28 @@ app.get("/admin/reminders/run", requireRoleHtml(["admin", "superuser"]), async (
 });
 
 app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const isAdmin = req.user.role === "admin";
   const users = await pool.query(
-    `SELECT id, name, email FROM users WHERE family_id = $1 ORDER BY name ASC`,
-    [req.user.family_id]
+    isAdmin
+      ? `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+         FROM users u
+         LEFT JOIN families f ON f.id = u.family_id
+         ORDER BY f.name ASC NULLS LAST, u.name ASC`
+      : `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+         FROM users u
+         LEFT JOIN families f ON f.id = u.family_id
+         WHERE u.family_id = $1
+         ORDER BY u.name ASC`,
+    isAdmin ? [] : [req.user.family_id]
   );
+  const myUid = Number(req.user.sub);
+  const optPatient = (u) => {
+    const prefix = isAdmin
+      ? `${escapeHtml((u.family_name || "").trim() || `Familia ${u.family_id}`)} · `
+      : "";
+    const sel = myUid === Number(u.id) ? "selected" : "";
+    return `<option value="${u.id}" ${sel}>${prefix}${escapeHtml(u.name || "")} · ${escapeHtml(u.email)}</option>`;
+  };
   const resetDeleted = Number(req.query?.deleted || 0);
   const showReset = req.query?.reset === "1";
   const content = `
@@ -9775,9 +9811,20 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
             <h1>Importación de medicamentos</h1>
             <p>Sube la receta y genera tomas automáticamente.</p>
           </div>
-          <div>Familia #${req.user.family_id}</div>
+          <div style="text-align:right; font-size:12px; max-width:200px;">${
+            isAdmin ? "Vista admin · todos los pacientes" : `Familia #${req.user.family_id}`
+          }</div>
         </div>
       </header>
+      ${
+        isAdmin
+          ? `<p class="note" style="background:#eff6ff; border:1px solid #93c5fd; padding:12px 14px; border-radius:12px; color:#1e3a5f; margin-top:14px;">
+              El desplegable <strong>Paciente</strong> incluye a <em>todos</em> los usuarios registrados. La importación se guarda en la familia de ese paciente.
+            </p>`
+          : `<p class="note" style="background:#fffbeb; border:1px solid #fcd34d; padding:12px 14px; border-radius:12px; color:#78350f; margin-top:14px;">
+              Solo ves pacientes de <strong>tu familia</strong>. Para importar a otras cuentas, usa un usuario administrador global.
+            </p>`
+      }
       ${
         showReset
           ? `<div class="card">
@@ -9799,14 +9846,7 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
               <select name="user_id" style="width:100%; border:1px solid #e2e8f0; border-radius:14px; padding:12px 14px; margin-top:6px;">
                 ${
                   users.rows.length
-                    ? users.rows
-                        .map(
-                          (u) =>
-                            `<option value="${u.id}" ${
-                              u.id === req.user.sub ? "selected" : ""
-                            }>${escapeHtml(u.name)} · ${escapeHtml(u.email)}</option>`
-                        )
-                        .join("")
+                    ? users.rows.map((u) => optPatient(u)).join("")
                     : `<option value="">Sin usuarios</option>`
                 }
               </select>
@@ -9834,14 +9874,7 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
           <select name="user_id" style="width:100%; border:1px solid #e2e8f0; border-radius:14px; padding:12px 14px; margin-top:6px;">
             ${
               users.rows.length
-                ? users.rows
-                    .map(
-                      (u) =>
-                        `<option value="${u.id}" ${
-                          u.id === req.user.sub ? "selected" : ""
-                        }>${escapeHtml(u.name)} · ${escapeHtml(u.email)}</option>`
-                    )
-                    .join("")
+                ? users.rows.map((u) => optPatient(u)).join("")
                 : `<option value="">Sin usuarios</option>`
             }
           </select>
@@ -9853,6 +9886,11 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
       <div class="card">
         <h1>Reset global (toda la familia)</h1>
         <p class="note">Borra TODOS los medicamentos, schedules, tomas y alertas de la familia. Esta acción es irreversible.</p>
+        ${
+          isAdmin
+            ? `<p class="note" style="color:#b45309;"><strong>Admin:</strong> este reset afecta solo a la familia de tu usuario en el panel (Familia #${req.user.family_id}), no a la del paciente elegido arriba.</p>`
+            : ""
+        }
         <form method="POST" action="/admin/meds-reset-all">
           <label>Escribe RESET-TODO para confirmar</label>
           <input name="confirm" placeholder="RESET-TODO" required />
@@ -9865,10 +9903,28 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
 });
 
 app.get("/admin/import-scan", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
+  const isAdmin = req.user.role === "admin";
   const users = await pool.query(
-    `SELECT id, name, email FROM users WHERE family_id = $1 ORDER BY name ASC`,
-    [req.user.family_id]
+    isAdmin
+      ? `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+         FROM users u
+         LEFT JOIN families f ON f.id = u.family_id
+         ORDER BY f.name ASC NULLS LAST, u.name ASC`
+      : `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+         FROM users u
+         LEFT JOIN families f ON f.id = u.family_id
+         WHERE u.family_id = $1
+         ORDER BY u.name ASC`,
+    isAdmin ? [] : [req.user.family_id]
   );
+  const myUid = Number(req.user.sub);
+  const optPatient = (u) => {
+    const prefix = isAdmin
+      ? `${escapeHtml((u.family_name || "").trim() || `Familia ${u.family_id}`)} · `
+      : "";
+    const sel = myUid === Number(u.id) ? "selected" : "";
+    return `<option value="${u.id}" ${sel}>${prefix}${escapeHtml(u.name || "")} · ${escapeHtml(u.email)}</option>`;
+  };
   const content = `
     <style>
       header { padding:20px; background:linear-gradient(120deg,#0f172a 0%, #1d4ed8 60%, #14b8a6 100%); color:#fff; border-radius:16px; }
@@ -9890,9 +9946,18 @@ app.get("/admin/import-scan", requireRoleHtml(["admin", "superuser"]), async (re
             <h1>Escanear desde imagen</h1>
             <p>Sube una foto o escaneo del medicamento.</p>
           </div>
-          <div>Familia #${req.user.family_id}</div>
+          <div style="text-align:right; font-size:12px; max-width:200px;">${
+            isAdmin ? "Vista admin · todos" : `Familia #${req.user.family_id}`
+          }</div>
         </div>
       </header>
+      ${
+        isAdmin
+          ? `<p class="note" style="background:#eff6ff; border:1px solid #93c5fd; padding:12px 14px; border-radius:12px; color:#1e3a5f; margin-top:14px;">
+              Como administrador puedes elegir cualquier paciente; los datos se guardan en su familia.
+            </p>`
+          : ""
+      }
       <div class="card">
         <h1>Importar desde imagen</h1>
         <form method="POST" action="/admin/import-scan" enctype="multipart/form-data">
@@ -9902,14 +9967,7 @@ app.get("/admin/import-scan", requireRoleHtml(["admin", "superuser"]), async (re
           <select name="user_id">
             ${
               users.rows.length
-                ? users.rows
-                    .map(
-                      (u) =>
-                        `<option value="${u.id}" ${
-                          u.id === req.user.sub ? "selected" : ""
-                        }>${escapeHtml(u.name)} · ${escapeHtml(u.email)}</option>`
-                    )
-                    .join("")
+                ? users.rows.map((u) => optPatient(u)).join("")
                 : `<option value="">Sin usuarios</option>`
             }
           </select>
@@ -9945,15 +10003,19 @@ app.post(
   requireRoleHtml(["admin", "superuser"]),
   upload.single("file"),
   async (req, res) => {
-    const familyId = req.user.family_id;
     const userId = Number(req.body?.user_id || req.user.sub);
     const skipNameCheck = req.body?.skip_name_check === "1";
     const previewOnly = req.body?.preview_only === "1";
     const fastOcr = req.body?.fast_ocr !== "0";
     const birthDate = normalizeDateOnly(req.body?.birth_date);
-    if (!familyId || !Number.isFinite(userId) || !req.file?.path) {
+    if (!Number.isFinite(userId) || !req.file?.path) {
       return res.redirect("/admin/import-scan");
     }
+    const resolved = await resolveImportFamilyId(req, userId);
+    if (!resolved.ok || resolved.familyId == null) {
+      return res.redirect("/admin/import-scan");
+    }
+    const familyId = resolved.familyId;
     try {
       const userResult = await pool.query(
         `SELECT id, name, first_name, last_name, birth_date FROM users WHERE id = $1 AND family_id = $2`,
@@ -10043,7 +10105,6 @@ app.post(
   requireRoleHtml(["admin", "superuser"]),
   upload.single("file"),
   async (req, res) => {
-  const familyId = req.user.family_id;
   const filePath = req.file?.path || req.body?.file_path;
   const userId = Number(req.body?.user_id || req.user.sub);
   const useOcr = req.body?.use_ocr === "1";
@@ -10051,6 +10112,11 @@ app.post(
   if (!filePath || !userId) {
     return res.redirect("/admin/import");
   }
+  const resolved = await resolveImportFamilyId(req, userId);
+  if (!resolved.ok || resolved.familyId == null) {
+    return res.redirect("/admin/import");
+  }
+  const familyId = resolved.familyId;
   try {
     const result = await importMedsFromPdf(
       filePath,
@@ -10286,7 +10352,6 @@ app.post(
 );
 
 app.post("/admin/meds-reset", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
   const userId = Number(req.body?.user_id);
   const confirm = String(req.body?.confirm || "").trim();
   if (confirm !== "RESET") {
@@ -10295,6 +10360,11 @@ app.post("/admin/meds-reset", requireRoleHtml(["admin", "superuser"]), async (re
   if (!Number.isFinite(userId)) {
     return res.redirect("/admin/import");
   }
+  const resolved = await resolveImportFamilyId(req, userId);
+  if (!resolved.ok || resolved.familyId == null) {
+    return res.redirect("/admin/import");
+  }
+  const familyId = resolved.familyId;
   const snapshotResult = await pool.query(
     `SELECT id, name, dosage, current_stock, expiration_date, import_batch_id
      FROM medicines
