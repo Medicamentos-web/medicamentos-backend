@@ -1671,6 +1671,27 @@ async function resolveImportFamilyId(req, userId) {
   return { ok: true, familyId: r.rows[0].family_id };
 }
 
+/** Desplegables admin: todos los pacientes; si no, solo la familia de sesión. */
+async function queryUsersForAdminSelect(req) {
+  const isAdmin = req.user.role === "admin";
+  if (isAdmin) {
+    return pool.query(
+      `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+       FROM users u
+       LEFT JOIN families f ON f.id = u.family_id
+       ORDER BY f.name ASC NULLS LAST, u.name ASC`
+    );
+  }
+  return pool.query(
+    `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+     FROM users u
+     LEFT JOIN families f ON f.id = u.family_id
+     WHERE u.family_id = $1
+     ORDER BY u.name ASC`,
+    [req.user.family_id]
+  );
+}
+
 function renderShell(req, title, active, content) {
   // Si no hay sesión, renderizar layout mínimo (solo login)
   if (!req.user) {
@@ -4218,8 +4239,12 @@ app.post("/admin/user-save", requireRoleHtml(["admin", "superuser"]), async (req
 // ADMIN MEDS HTML (asignación por schedule)
 // =============================================================================
 app.get("/admin/meds/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
   const userId = Number(req.params.id);
+  const resolved = await resolveImportFamilyId(req, userId);
+  if (!resolved.ok || resolved.familyId == null) {
+    return res.redirect("/admin/users");
+  }
+  const familyId = resolved.familyId;
   const [userResult, medsResult, schedulesResult] = await Promise.all([
     pool.query(`SELECT id, name, email FROM users WHERE id = $1 AND family_id = $2`, [
       userId,
@@ -4317,8 +4342,12 @@ app.get("/admin/meds/:id", requireRoleHtml(["admin", "superuser"]), async (req, 
 });
 
 app.post("/admin/meds-add/:id", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
   const userId = Number(req.params.id);
+  const resolved = await resolveImportFamilyId(req, userId);
+  if (!resolved.ok || resolved.familyId == null) {
+    return res.redirect("/admin/users");
+  }
+  const familyId = resolved.familyId;
   const { medicine_id, dose_time, frequency, start_date, end_date } = req.body || {};
   const med = await pool.query(
     `SELECT id FROM medicines WHERE id = $1 AND family_id = $2 AND user_id = $3`,
@@ -4336,9 +4365,13 @@ app.post("/admin/meds-add/:id", requireRoleHtml(["admin", "superuser"]), async (
 });
 
 app.get("/admin/meds-del/:mid/:uid", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
   const scheduleId = Number(req.params.mid);
   const userId = Number(req.params.uid);
+  const resolved = await resolveImportFamilyId(req, userId);
+  if (!resolved.ok || resolved.familyId == null) {
+    return res.redirect("/admin/users");
+  }
+  const familyId = resolved.familyId;
   await pool.query(
     `DELETE FROM schedules s
      USING medicines m, users u
@@ -7854,27 +7887,59 @@ app.post("/api/disclaimer-accepted", requireAuth, async (req, res) => {
 // =============================================================================
 app.get("/admin/search", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   const familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const q = (req.query?.q || "").trim();
   if (!q) return res.redirect("/dashboard");
 
   try {
     const like = `%${q}%`;
     const [users, meds, alertsResult] = await Promise.all([
-      pool.query(
-        `SELECT id, name, email, role FROM users WHERE family_id = $1 AND (name ILIKE $2 OR email ILIKE $2 OR first_name ILIKE $2 OR last_name ILIKE $2) ORDER BY name LIMIT 20`,
-        [familyId, like]
-      ),
-      pool.query(
-        `SELECT m.id, m.name, m.dosage, m.current_stock, u.name AS user_name
-         FROM medicines m JOIN users u ON u.id = m.user_id
-         WHERE m.family_id = $1 AND (m.name ILIKE $2 OR m.dosage ILIKE $2) ORDER BY m.name LIMIT 20`,
-        [familyId, like]
-      ),
-      pool.query(
-        `SELECT id, type, message, med_name, created_at FROM alerts
-         WHERE family_id = $1 AND (message ILIKE $2 OR med_name ILIKE $2) ORDER BY created_at DESC LIMIT 20`,
-        [familyId, like]
-      ),
+      isAdmin
+        ? pool.query(
+            `SELECT u.id, u.name, u.email, u.role, u.family_id, f.name AS family_name
+             FROM users u
+             LEFT JOIN families f ON f.id = u.family_id
+             WHERE u.name ILIKE $1 OR u.email ILIKE $1 OR u.first_name ILIKE $1 OR u.last_name ILIKE $1
+             ORDER BY f.name ASC NULLS LAST, u.name ASC
+             LIMIT 40`,
+            [like]
+          )
+        : pool.query(
+            `SELECT id, name, email, role FROM users WHERE family_id = $1 AND (name ILIKE $2 OR email ILIKE $2 OR first_name ILIKE $2 OR last_name ILIKE $2) ORDER BY name LIMIT 20`,
+            [familyId, like]
+          ),
+      isAdmin
+        ? pool.query(
+            `SELECT m.id, m.name, m.dosage, m.current_stock, u.name AS user_name, m.family_id,
+                    fam.name AS family_name
+             FROM medicines m
+             JOIN users u ON u.id = m.user_id
+             LEFT JOIN families fam ON fam.id = m.family_id
+             WHERE m.name ILIKE $1 OR m.dosage ILIKE $1
+             ORDER BY m.name
+             LIMIT 40`,
+            [like]
+          )
+        : pool.query(
+            `SELECT m.id, m.name, m.dosage, m.current_stock, u.name AS user_name
+             FROM medicines m JOIN users u ON u.id = m.user_id
+             WHERE m.family_id = $1 AND (m.name ILIKE $2 OR m.dosage ILIKE $2) ORDER BY m.name LIMIT 20`,
+            [familyId, like]
+          ),
+      isAdmin
+        ? pool.query(
+            `SELECT id, type, message, med_name, created_at, family_id
+             FROM alerts
+             WHERE message ILIKE $1 OR med_name ILIKE $1 OR type ILIKE $1
+             ORDER BY created_at DESC
+             LIMIT 40`,
+            [like]
+          )
+        : pool.query(
+            `SELECT id, type, message, med_name, created_at FROM alerts
+             WHERE family_id = $1 AND (message ILIKE $2 OR med_name ILIKE $2) ORDER BY created_at DESC LIMIT 20`,
+            [familyId, like]
+          ),
     ]);
 
     const escQ = escapeHtml(q);
@@ -7889,7 +7954,11 @@ app.get("/admin/search", requireRoleHtml(["admin", "superuser"]), async (req, re
               <div class="list-item" style="display:flex; justify-content:space-between; align-items:center;">
                 <div>
                   <strong>${escapeHtml(u.name)}</strong>
-                  <div class="meta">${escapeHtml(u.email)} · ${u.role}</div>
+                  <div class="meta">${escapeHtml(u.email)} · ${u.role}${
+                    isAdmin && u.family_name != null
+                      ? ` · ${escapeHtml(u.family_name)}`
+                      : ""
+                  }</div>
                 </div>
                 <div style="display:flex; gap:8px;">
                   <a class="btn outline" href="/admin/user-edit/${u.id}">Editar</a>
@@ -7907,7 +7976,11 @@ app.get("/admin/search", requireRoleHtml(["admin", "superuser"]), async (req, re
               <div class="list-item" style="display:flex; justify-content:space-between; align-items:center;">
                 <div>
                   <strong>${escapeHtml(m.name)}</strong> · ${escapeHtml(m.dosage || "")}
-                  <div class="meta">Stock: ${m.current_stock} · Paciente: ${escapeHtml(m.user_name || "")}</div>
+                  <div class="meta">Stock: ${m.current_stock} · Paciente: ${escapeHtml(m.user_name || "")}${
+                    isAdmin && m.family_name != null
+                      ? ` · Familia: ${escapeHtml(m.family_name)}`
+                      : ""
+                  }</div>
                 </div>
                 <a class="btn outline" href="/admin/meds-edit/${m.id}">Editar</a>
               </div>
@@ -8285,32 +8358,54 @@ async function runAlertsJob() {
 }
 
 app.get("/admin/alerts/run", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  const qFamily = req.query?.family_id ? Number(req.query.family_id) : 0;
   const userId = Number(req.query?.user_id);
-  const where = Number.isFinite(userId) ? "family_id = $1 AND user_id = $2" : "family_id = $1";
-  const args = Number.isFinite(userId) ? [familyId, userId] : [familyId];
-  const medicines = await pool.query(
-    `SELECT id, name, dosage, current_stock, user_id
-     FROM medicines
-     WHERE ${where} AND current_stock <= $${args.length + 1}
-     ORDER BY current_stock ASC`,
-    [...args, LOW_STOCK_THRESHOLD]
-  );
-  for (const med of medicines.rows) {
-    const message = `Stock bajo: ${med.name} (${med.dosage || "N/A"}) · ${med.current_stock}`;
-    await pool.query(
-      `INSERT INTO alerts (family_id, user_id, type, level, message)
-       VALUES ($1, $2, 'low_stock', 'warning', $3)`,
-      [familyId, med.user_id || null, message]
+
+  const runLowStockForFamily = async (familyId) => {
+    const where = Number.isFinite(userId)
+      ? "family_id = $1 AND user_id = $2"
+      : "family_id = $1";
+    const args = Number.isFinite(userId) ? [familyId, userId] : [familyId];
+    const medicines = await pool.query(
+      `SELECT id, name, dosage, current_stock, user_id
+       FROM medicines
+       WHERE ${where} AND current_stock <= $${args.length + 1}
+       ORDER BY current_stock ASC`,
+      [...args, LOW_STOCK_THRESHOLD]
     );
+    for (const med of medicines.rows) {
+      const message = `Stock bajo: ${med.name} (${med.dosage || "N/A"}) · ${med.current_stock}`;
+      await pool.query(
+        `INSERT INTO alerts (family_id, user_id, type, level, message)
+         VALUES ($1, $2, 'low_stock', 'warning', $3)`,
+        [familyId, med.user_id || null, message]
+      );
+    }
+    return medicines.rows;
+  };
+
+  let allRows = [];
+  if (isAdmin && Number.isFinite(qFamily) && qFamily > 0) {
+    allRows = await runLowStockForFamily(qFamily);
+  } else if (isAdmin) {
+    const fams = await pool.query(`SELECT id FROM families`);
+    for (const f of fams.rows) {
+      const part = await runLowStockForFamily(f.id);
+      allRows = allRows.concat(part);
+    }
+  } else {
+    allRows = await runLowStockForFamily(sessionFamilyId);
   }
-  if (medicines.rows.length) {
-    const pdfBuffer = await buildCriticalMedsPdf(medicines.rows, {
+
+  if (allRows.length) {
+    const pdfBuffer = await buildCriticalMedsPdf(allRows, {
       title: "Medicamentos críticos (stock bajo)",
     });
     await sendAdminAlertEmail(
       "Alertas de stock bajo",
-      `<p>Se generaron ${medicines.rows.length} alertas de stock bajo.</p>
+      `<p>Se generaron ${allRows.length} alertas de stock bajo.</p>
        <p>Adjunto: PDF con medicamentos críticos.</p>`,
       [
         {
@@ -8324,12 +8419,25 @@ app.get("/admin/alerts/run", requireRoleHtml(["admin", "superuser"]), async (req
 });
 
 app.post("/admin/alerts/run", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
-  const created = await generateAlertsForFamily(familyId);
-  await sendAdminAlertEmail(
-    "Alertas de medicación",
-    `<p>Se generaron ${created} alertas para la familia ${familyId}.</p>`
-  );
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  if (isAdmin) {
+    const fams = await pool.query(`SELECT id FROM families`);
+    let total = 0;
+    for (const f of fams.rows) {
+      total += await generateAlertsForFamily(f.id);
+    }
+    await sendAdminAlertEmail(
+      "Alertas de medicación",
+      `<p>Se generaron ${total} alertas (todas las familias).</p>`
+    );
+  } else {
+    const created = await generateAlertsForFamily(sessionFamilyId);
+    await sendAdminAlertEmail(
+      "Alertas de medicación",
+      `<p>Se generaron ${created} alertas para la familia ${sessionFamilyId}.</p>`
+    );
+  }
   res.redirect("/admin/alerts");
 });
 
@@ -8347,14 +8455,23 @@ app.get("/admin/alerts/test-email", requireRoleHtml(["admin", "superuser"]), asy
     return res.send(renderShell(_req, "SMTP no configurado", "alerts", content));
   }
   try {
+    const isAdmin = _req.user.role === "admin";
     const familyId = _req.user.family_id;
-    const meds = await pool.query(
-      `SELECT name, dosage, current_stock
-       FROM medicines
-       WHERE family_id = $1 AND current_stock <= $2
-       ORDER BY current_stock ASC`,
-      [familyId, LOW_STOCK_THRESHOLD]
-    );
+    const meds = isAdmin
+      ? await pool.query(
+          `SELECT name, dosage, current_stock
+           FROM medicines
+           WHERE current_stock <= $1
+           ORDER BY family_id ASC, current_stock ASC`,
+          [LOW_STOCK_THRESHOLD]
+        )
+      : await pool.query(
+          `SELECT name, dosage, current_stock
+           FROM medicines
+           WHERE family_id = $1 AND current_stock <= $2
+           ORDER BY current_stock ASC`,
+          [familyId, LOW_STOCK_THRESHOLD]
+        );
     const attachments = meds.rows.length
       ? [
           {
@@ -8396,29 +8513,109 @@ app.get("/admin/alerts/test-email", requireRoleHtml(["admin", "superuser"]), asy
 });
 
 app.get("/admin/alerts", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
-  const users = await pool.query(
-    `SELECT id, name, email FROM users WHERE family_id = $1 ORDER BY name ASC`,
-    [familyId]
-  );
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  const filterFamilyId = isAdmin && req.query?.family_id ? Number(req.query.family_id) : 0;
+  const filterUserId = Number(req.query?.user_id || 0);
+
+  const users = await queryUsersForAdminSelect(req);
+  let familiesForFilter = [];
+  if (isAdmin) {
+    const famRes = await pool.query(
+      `SELECT id, name FROM families ORDER BY COALESCE(NULLIF(TRIM(name),''), 'zzz'), id ASC`
+    );
+    familiesForFilter = famRes.rows;
+  }
+
+  const params = [];
+  const whereParts = [];
+  if (!isAdmin) {
+    params.push(sessionFamilyId);
+    whereParts.push(`a.family_id = $${params.length}`);
+  } else if (Number.isFinite(filterFamilyId) && filterFamilyId > 0) {
+    params.push(filterFamilyId);
+    whereParts.push(`a.family_id = $${params.length}`);
+  }
+  if (Number.isFinite(filterUserId) && filterUserId > 0) {
+    params.push(filterUserId);
+    whereParts.push(`a.user_id = $${params.length}`);
+  }
+  const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
   const alerts = await pool.query(
-    `SELECT id, type, level, message, created_at, read_at
-     FROM alerts
-     WHERE family_id = $1
-     ORDER BY created_at DESC
-     LIMIT 50`,
-    [familyId]
+    `SELECT a.id, a.type, a.level, a.message, a.created_at, a.read_at,
+            a.family_id, f.name AS family_name
+     FROM alerts a
+     LEFT JOIN families f ON f.id = a.family_id
+     ${whereSql}
+     ORDER BY a.created_at DESC
+     LIMIT 200`,
+    params
   );
+
+  const optUser = (u) => {
+    const prefix = isAdmin
+      ? `${escapeHtml((u.family_name || "").trim() || `Familia ${u.family_id}`)} · `
+      : "";
+    const sel = Number(u.id) === filterUserId ? "selected" : "";
+    return `<option value="${u.id}" ${sel}>${prefix}${escapeHtml(u.name || "")} · ${escapeHtml(u.email)}</option>`;
+  };
+
   const content = `
     <div class="card">
       <h1>Alertas</h1>
+      ${
+        isAdmin
+          ? `<p class="muted" style="font-size:12px; background:#eff6ff; border:1px solid #93c5fd; padding:10px 12px; border-radius:10px;">
+              Vista <strong>admin</strong>: se muestran alertas de <strong>todas las familias</strong> (usa los filtros o borra por familia/paciente).
+            </p>`
+          : `<p class="muted" style="font-size:12px;">Solo alertas de tu familia.</p>`
+      }
       <div class="actions" style="margin-top:12px;">
-        <a class="btn primary" href="/admin/alerts/run">⚠ Generar alertas</a>
+        <a class="btn primary" href="/admin/alerts/run">⚠ Generar alertas (stock / jobs)</a>
         <a class="btn outline" href="/admin/alerts/test-email">✉ Probar email</a>
       </div>
-      <form method="POST" action="/admin/alerts/clear" class="actions" style="margin-top:12px;">
+      <form method="GET" action="/admin/alerts" class="actions" style="margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+        ${
+          isAdmin && familiesForFilter.length
+            ? `<select name="family_id" class="form-control" style="max-width:220px;">
+                <option value="">Todas las familias</option>
+                ${familiesForFilter
+                  .map(
+                    (fam) =>
+                      `<option value="${fam.id}" ${filterFamilyId === fam.id ? "selected" : ""}>${escapeHtml(
+                        (fam.name || "").trim() || `Familia ${fam.id}`
+                      )}</option>`
+                  )
+                  .join("")}
+              </select>`
+            : ""
+        }
+        <select name="user_id" class="form-control" style="max-width:280px;">
+          <option value="">Todos los pacientes</option>
+          ${users.rows.length ? users.rows.map((u) => optUser(u)).join("") : ""}
+        </select>
+        <button class="btn outline" type="submit">🔎 Filtrar</button>
+        ${isAdmin && (filterFamilyId || filterUserId) ? `<a class="btn outline" href="/admin/alerts">Limpiar</a>` : ""}
+      </form>
+      <form method="POST" action="/admin/alerts/clear" class="actions" style="margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+        ${
+          isAdmin && familiesForFilter.length
+            ? `<select name="family_scope" class="form-control" style="max-width:240px;">
+                <option value="all">Borrar: todas las familias</option>
+                ${familiesForFilter
+                  .map(
+                    (fam) =>
+                      `<option value="${fam.id}">${escapeHtml(
+                        (fam.name || "").trim() || `Familia ${fam.id}`
+                      )}</option>`
+                  )
+                  .join("")}
+              </select>`
+            : ""
+        }
         <select name="user_id" class="form-control" style="max-width:320px;">
-          <option value="">Todas las alertas</option>
+          <option value="">Todas las alertas (según alcance arriba)</option>
           ${
             users.rows.length
               ? users.rows
@@ -8438,6 +8635,7 @@ app.get("/admin/alerts", requireRoleHtml(["admin", "superuser"]), async (req, re
         <table class="table">
           <thead>
             <tr>
+              ${isAdmin ? "<th>Familia</th>" : ""}
               <th>Tipo</th>
               <th>Mensaje</th>
               <th>Estado</th>
@@ -8451,6 +8649,11 @@ app.get("/admin/alerts", requireRoleHtml(["admin", "superuser"]), async (req, re
                     .map(
                       (row) => `
             <tr>
+              ${
+                isAdmin
+                  ? `<td>${escapeHtml((row.family_name || "").trim() || `Familia ${row.family_id}`)}</td>`
+                  : ""
+              }
               <td>${escapeHtml(row.type)}</td>
               <td>${escapeHtml(row.message)}</td>
               <td>
@@ -8464,7 +8667,7 @@ app.get("/admin/alerts", requireRoleHtml(["admin", "superuser"]), async (req, re
               </tr>`
                     )
                     .join("")
-                : `<tr><td colspan="4" style="padding:12px; color:var(--muted);">Sin alertas</td></tr>`
+                : `<tr><td colspan="${isAdmin ? 5 : 4}" style="padding:12px; color:var(--muted);">Sin alertas</td></tr>`
             }
           </tbody>
         </table>
@@ -8475,27 +8678,49 @@ app.get("/admin/alerts", requireRoleHtml(["admin", "superuser"]), async (req, re
 });
 
 app.get("/admin/dose-requests", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const requests = await pool.query(
-    `SELECT r.id, r.requested_dosage, r.effective_date, r.created_at,
+    isAdmin
+      ? `SELECT r.id, r.requested_dosage, r.effective_date, r.created_at, r.family_id,
+            fam.name AS family_name,
             u.name AS user_name, u.email AS user_email,
             m.name AS med_name, m.dosage AS current_dosage,
             s.dose_time
      FROM dose_change_requests r
+     JOIN families fam ON fam.id = r.family_id
+     JOIN users u ON u.id = r.user_id
+     JOIN medicines m ON m.id = r.medicine_id
+     JOIN schedules s ON s.id = r.schedule_id
+     WHERE r.status = 'pending'
+     ORDER BY r.created_at DESC`
+      : `SELECT r.id, r.requested_dosage, r.effective_date, r.created_at, r.family_id,
+            fam.name AS family_name,
+            u.name AS user_name, u.email AS user_email,
+            m.name AS med_name, m.dosage AS current_dosage,
+            s.dose_time
+     FROM dose_change_requests r
+     JOIN families fam ON fam.id = r.family_id
      JOIN users u ON u.id = r.user_id
      JOIN medicines m ON m.id = r.medicine_id
      JOIN schedules s ON s.id = r.schedule_id
      WHERE r.family_id = $1 AND r.status = 'pending'
      ORDER BY r.created_at DESC`,
-    [familyId]
+    isAdmin ? [] : [sessionFamilyId]
   );
   const content = `
     <div class="card">
       <h1>Solicitudes de cambio de dosis</h1>
+      ${
+        isAdmin
+          ? `<p class="muted" style="font-size:12px;">Vista admin: solicitudes de <strong>todas</strong> las familias.</p>`
+          : ""
+      }
       <div style="margin-top:12px; overflow:auto;">
         <table class="table">
           <thead>
             <tr>
+              ${isAdmin ? "<th>Familia</th>" : ""}
               <th>Paciente</th>
               <th>Medicamento</th>
               <th>Dosis actual</th>
@@ -8512,6 +8737,11 @@ app.get("/admin/dose-requests", requireRoleHtml(["admin", "superuser"]), async (
                     .map(
                       (row) => `
             <tr>
+              ${
+                isAdmin
+                  ? `<td>${escapeHtml((row.family_name || "").trim() || `Familia ${row.family_id}`)}</td>`
+                  : ""
+              }
               <td>${escapeHtml(row.user_name)} · ${escapeHtml(row.user_email || "")}</td>
               <td>${escapeHtml(row.med_name)}</td>
               <td>${escapeHtml(row.current_dosage || "N/A")}</td>
@@ -8529,7 +8759,7 @@ app.get("/admin/dose-requests", requireRoleHtml(["admin", "superuser"]), async (
             </tr>`
                     )
                     .join("")
-                : `<tr><td colspan="7" style="padding:12px; color:var(--muted);">Sin solicitudes pendientes</td></tr>`
+                : `<tr><td colspan="${isAdmin ? 8 : 7}" style="padding:12px; color:var(--muted);">Sin solicitudes pendientes</td></tr>`
             }
           </tbody>
         </table>
@@ -8540,41 +8770,68 @@ app.get("/admin/dose-requests", requireRoleHtml(["admin", "superuser"]), async (
 });
 
 app.get("/admin/medical-records", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const userId = Number(req.query?.user_id || 0);
-  const users = await pool.query(
-    `SELECT id, name, email FROM users WHERE family_id = $1 ORDER BY name ASC`,
-    [familyId]
-  );
-  const params = [familyId];
-  let where = "WHERE family_id = $1";
+  const filterFamilyId = isAdmin && req.query?.family_id ? Number(req.query.family_id) : 0;
+
+  const users = await queryUsersForAdminSelect(req);
+  let familiesForFilter = [];
+  if (isAdmin) {
+    const famRes = await pool.query(
+      `SELECT id, name FROM families ORDER BY COALESCE(NULLIF(TRIM(name),''), 'zzz'), id ASC`
+    );
+    familiesForFilter = famRes.rows;
+  }
+
+  const params = [];
+  const whereParts = [];
+  if (!isAdmin) {
+    params.push(sessionFamilyId);
+    whereParts.push(`mr.family_id = $${params.length}`);
+  } else if (Number.isFinite(filterFamilyId) && filterFamilyId > 0) {
+    params.push(filterFamilyId);
+    whereParts.push(`mr.family_id = $${params.length}`);
+  }
   if (userId) {
     params.push(userId);
-    where += ` AND user_id = $${params.length}`;
+    whereParts.push(`mr.user_id = $${params.length}`);
   }
+  const whereSql = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+
   const records = await pool.query(
-    `SELECT id, user_id, title, record_date, created_at
-     FROM medical_records
-     ${where}
-     ORDER BY created_at DESC
-     LIMIT 100`,
+    `SELECT mr.id, mr.user_id, mr.title, mr.record_date, mr.created_at, mr.family_id,
+            u.name AS patient_name, fam.name AS family_name
+     FROM medical_records mr
+     LEFT JOIN users u ON u.id = mr.user_id
+     LEFT JOIN families fam ON fam.id = mr.family_id
+     ${whereSql}
+     ORDER BY mr.created_at DESC
+     LIMIT 200`,
     params
   );
+
+  const optUserOption = (u, selectedId) => {
+    const prefix = isAdmin
+      ? `${escapeHtml((u.family_name || "").trim() || `Familia ${u.family_id}`)} · `
+      : "";
+    const sel = Number(u.id) === Number(selectedId) ? "selected" : "";
+    return `<option value="${u.id}" ${sel}>${prefix}${escapeHtml(u.name || "")} · ${escapeHtml(u.email)}</option>`;
+  };
+
   const content = `
     <div class="card">
       <h1>Subir PDF médico</h1>
+      ${
+        isAdmin
+          ? `<p class="muted" style="font-size:12px;">Admin: el PDF se guarda en la <strong>familia del paciente</strong> elegido.</p>`
+          : ""
+      }
       <form method="POST" action="/admin/medical-records" enctype="multipart/form-data" class="actions">
-        <select name="user_id" class="form-control" style="max-width:260px;">
+        <select name="user_id" class="form-control" style="max-width:360px;">
           ${
             users.rows.length
-              ? users.rows
-                  .map(
-                    (u) =>
-                      `<option value="${u.id}">${escapeHtml(u.name)} · ${escapeHtml(
-                        u.email
-                      )}</option>`
-                  )
-                  .join("")
+              ? users.rows.map((u) => optUserOption(u, 0)).join("")
               : `<option value="">Sin usuarios</option>`
           }
         </select>
@@ -8587,29 +8844,39 @@ app.get("/admin/medical-records", requireRoleHtml(["admin", "superuser"]), async
     </div>
     <div class="card">
       <h1>Historial médico</h1>
-      <form method="GET" action="/admin/medical-records" class="actions">
-        <select name="user_id" class="form-control" style="max-width:260px;">
+      <form method="GET" action="/admin/medical-records" class="actions" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+        ${
+          isAdmin && familiesForFilter.length
+            ? `<select name="family_id" class="form-control" style="max-width:220px;">
+                <option value="">Todas las familias</option>
+                ${familiesForFilter
+                  .map(
+                    (fam) =>
+                      `<option value="${fam.id}" ${filterFamilyId === fam.id ? "selected" : ""}>${escapeHtml(
+                        (fam.name || "").trim() || `Familia ${fam.id}`
+                      )}</option>`
+                  )
+                  .join("")}
+              </select>`
+            : ""
+        }
+        <select name="user_id" class="form-control" style="max-width:280px;">
           <option value="">Todos los usuarios</option>
           ${
             users.rows.length
-              ? users.rows
-                  .map(
-                    (u) =>
-                      `<option value="${u.id}" ${u.id === userId ? "selected" : ""}>${escapeHtml(
-                        u.name
-                      )} · ${escapeHtml(u.email)}</option>`
-                  )
-                  .join("")
+              ? users.rows.map((u) => optUserOption(u, userId)).join("")
               : `<option value="">Sin usuarios</option>`
           }
         </select>
         <button class="btn outline" type="submit">🔎 Filtrar</button>
+        ${isAdmin && (filterFamilyId || userId) ? `<a class="btn outline" href="/admin/medical-records">Limpiar</a>` : ""}
       </form>
       <div style="margin-top:12px; overflow:auto;">
         <table class="table">
           <thead>
             <tr>
               <th>ID</th>
+              ${isAdmin ? "<th>Familia</th>" : ""}
               <th>Paciente</th>
               <th>Título</th>
               <th>Fecha</th>
@@ -8625,7 +8892,12 @@ app.get("/admin/medical-records", requireRoleHtml(["admin", "superuser"]), async
                       (row) => `
             <tr>
               <td>${row.id}</td>
-              <td>${row.user_id}</td>
+              ${
+                isAdmin
+                  ? `<td>${escapeHtml((row.family_name || "").trim() || `Familia ${row.family_id}`)}</td>`
+                  : ""
+              }
+              <td>${escapeHtml(row.patient_name || `Usuario #${row.user_id}`)}</td>
               <td>${escapeHtml(row.title)}</td>
               <td>${row.record_date ? formatDateOnlyDisplay(row.record_date) : "-"}</td>
               <td>${formatDateTime(row.created_at)}</td>
@@ -8633,7 +8905,7 @@ app.get("/admin/medical-records", requireRoleHtml(["admin", "superuser"]), async
             </tr>`
                     )
                     .join("")
-                : `<tr><td colspan="6" style="padding:12px; color:var(--muted);">Sin registros</td></tr>`
+                : `<tr><td colspan="${isAdmin ? 7 : 6}" style="padding:12px; color:var(--muted);">Sin registros</td></tr>`
             }
           </tbody>
         </table>
@@ -8648,11 +8920,14 @@ app.post(
   requireRoleHtml(["admin", "superuser"]),
   upload.single("file"),
   async (req, res) => {
-    const familyId = req.user.family_id;
     const userId = Number(req.body?.user_id);
     const title = String(req.body?.title || "").trim();
     const recordDate = normalizeDateOnly(req.body?.record_date);
     if (!Number.isFinite(userId) || !title || !req.file?.path) {
+      return res.redirect("/admin/medical-records");
+    }
+    const resolved = await resolveImportFamilyId(req, userId);
+    if (!resolved.ok || resolved.familyId == null) {
       return res.redirect("/admin/medical-records");
     }
     const fileName = `${Date.now()}_${safeFilename(req.file.originalname)}`;
@@ -8666,24 +8941,30 @@ app.post(
     await pool.query(
       `INSERT INTO medical_records (family_id, user_id, title, record_date, file_path)
        VALUES ($1, $2, $3, $4, $5)`,
-      [familyId, userId, title, recordDate || null, targetPath]
+      [resolved.familyId, userId, title, recordDate || null, targetPath]
     );
     res.redirect("/admin/medical-records");
   }
 );
 
 app.get("/admin/medical-records/:id/download", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const recordId = Number(req.params.id);
   if (!Number.isFinite(recordId)) {
     return res.redirect("/admin/medical-records");
   }
-  const record = await pool.query(
-    `SELECT title, file_path
-     FROM medical_records
-     WHERE id = $1 AND family_id = $2`,
-    [recordId, familyId]
-  );
+  const record = isAdmin
+    ? await pool.query(
+        `SELECT title, file_path FROM medical_records WHERE id = $1`,
+        [recordId]
+      )
+    : await pool.query(
+        `SELECT title, file_path
+         FROM medical_records
+         WHERE id = $1 AND family_id = $2`,
+        [recordId, sessionFamilyId]
+      );
   if (!record.rows.length) {
     return res.redirect("/admin/medical-records");
   }
@@ -8692,17 +8973,25 @@ app.get("/admin/medical-records/:id/download", requireRoleHtml(["admin", "superu
 });
 
 app.post("/admin/dose-requests/:id/approve", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const requestId = Number(req.params.id);
   if (!Number.isFinite(requestId)) {
     return res.redirect("/admin/dose-requests");
   }
-  const request = await pool.query(
-    `SELECT id, medicine_id, requested_dosage
-     FROM dose_change_requests
-     WHERE id = $1 AND family_id = $2 AND status = 'pending'`,
-    [requestId, familyId]
-  );
+  const request = isAdmin
+    ? await pool.query(
+        `SELECT id, medicine_id, requested_dosage
+         FROM dose_change_requests
+         WHERE id = $1 AND status = 'pending'`,
+        [requestId]
+      )
+    : await pool.query(
+        `SELECT id, medicine_id, requested_dosage
+         FROM dose_change_requests
+         WHERE id = $1 AND family_id = $2 AND status = 'pending'`,
+        [requestId, sessionFamilyId]
+      );
   if (!request.rows.length) {
     return res.redirect("/admin/dose-requests");
   }
@@ -8718,16 +9007,25 @@ app.post("/admin/dose-requests/:id/approve", requireRoleHtml(["admin", "superuse
 });
 
 app.post("/admin/dose-requests/:id/reject", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const requestId = Number(req.params.id);
   if (!Number.isFinite(requestId)) {
     return res.redirect("/admin/dose-requests");
   }
-  await pool.query(
-    `UPDATE dose_change_requests SET status = 'rejected'
-     WHERE id = $1 AND family_id = $2 AND status = 'pending'`,
-    [requestId, familyId]
-  );
+  if (isAdmin) {
+    await pool.query(
+      `UPDATE dose_change_requests SET status = 'rejected'
+       WHERE id = $1 AND status = 'pending'`,
+      [requestId]
+    );
+  } else {
+    await pool.query(
+      `UPDATE dose_change_requests SET status = 'rejected'
+       WHERE id = $1 AND family_id = $2 AND status = 'pending'`,
+      [requestId, sessionFamilyId]
+    );
+  }
   res.redirect("/admin/dose-requests");
 });
 
@@ -9866,22 +10164,34 @@ app.post("/admin/logs/restore", requireRoleHtml(["admin"]), async (req, res) => 
 });
 
 app.post("/admin/alerts/clear", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const rawUserId = String(req.body?.user_id || "").trim();
   const userId = Number(rawUserId);
+  const familyScope = String(req.body?.family_scope || "").trim();
+
   if (rawUserId && Number.isFinite(userId) && userId > 0) {
-    await pool.query(`DELETE FROM alerts WHERE family_id = $1 AND user_id = $2`, [
-      familyId,
-      userId,
-    ]);
+    const r = await resolveImportFamilyId(req, userId);
+    if (!r.ok) return res.redirect("/admin/alerts");
+    await pool.query(`DELETE FROM alerts WHERE family_id = $1 AND user_id = $2`, [r.familyId, userId]);
+  } else if (isAdmin && familyScope === "all") {
+    await pool.query(`DELETE FROM alerts`);
+  } else if (isAdmin && familyScope && /^\d+$/.test(familyScope)) {
+    await pool.query(`DELETE FROM alerts WHERE family_id = $1`, [Number(familyScope)]);
   } else {
-    await pool.query(`DELETE FROM alerts WHERE family_id = $1`, [familyId]);
+    await pool.query(`DELETE FROM alerts WHERE family_id = $1`, [sessionFamilyId]);
   }
   res.redirect("/admin/alerts");
 });
 
 app.get("/admin/reminders/run", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
-  const familyId = req.user.family_id;
+  let familyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
+  const qFam = req.query?.family_id ? Number(req.query.family_id) : 0;
+  if (isAdmin && Number.isFinite(qFam) && qFam > 0) {
+    const ok = await pool.query(`SELECT id FROM families WHERE id = $1`, [qFam]);
+    if (ok.rows.length) familyId = qFam;
+  }
   const now = new Date();
   const weekStart = new Date(now);
   weekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
