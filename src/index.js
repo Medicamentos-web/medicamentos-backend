@@ -1149,26 +1149,72 @@ async function sendPushToUser(userId, payload) {
   return sent;
 }
 
+/** Ordena page-2.png, page-10.png numéricamente. */
+function sortPngPageFiles(names) {
+  return names.sort((a, b) => {
+    const na = parseInt(String(a).replace(/\D/g, ""), 10) || 0;
+    const nb = parseInt(String(b).replace(/\D/g, ""), 10) || 0;
+    return na - nb;
+  });
+}
+
+/**
+ * OCR de PDF: más rápido que antes por
+ * - render ~120 DPI (env OCR_RENDER_DPI, rango 72–200)
+ * - tesseract --oem 1 --psm 6 (rápido; env OCR_TESSERACT_PSM para ajustar)
+ * - varias páginas en paralelo (env OCR_PAGE_CONCURRENCY, por defecto 3)
+ * - límite opcional de páginas (env OCR_MAX_PAGES, por defecto todas)
+ */
 function runOcrOnPdf(filePath, lang = "deu") {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "med-ocr-"));
+  const prefix = path.join(tmpDir, "page");
+  const dpi = Math.min(200, Math.max(72, Number(process.env.OCR_RENDER_DPI || 120)));
+  const maxPages = Math.max(1, parseInt(process.env.OCR_MAX_PAGES || "0", 10) || 999);
+  const concurrency = Math.min(8, Math.max(1, parseInt(process.env.OCR_PAGE_CONCURRENCY || "3", 10)));
+  const psm = String(process.env.OCR_TESSERACT_PSM || "6").replace(/\D/g, "") || "6";
+
+  const cleanup = () => {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (_) {}
+  };
+
+  const execTesseract = (pngPath) =>
+    new Promise((res, rej) => {
+      execFile(
+        "tesseract",
+        [pngPath, "stdout", "-l", lang, "--oem", "1", "--psm", psm],
+        { maxBuffer: 15 * 1024 * 1024 },
+        (e2, stdout) => (e2 ? rej(e2) : res(stdout || ""))
+      );
+    });
+
   return new Promise((resolve, reject) => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "med-ocr-"));
-    const prefix = path.join(tmpDir, "page");
-    execFile("pdftoppm", ["-png", filePath, prefix], (err) => {
-      if (err) return reject(err);
-      const files = fs
-        .readdirSync(tmpDir)
-        .filter((f) => f.endsWith(".png"))
-        .map((f) => path.join(tmpDir, f));
-      let text = "";
-      const runNext = (i) => {
-        if (i >= files.length) return resolve(text);
-        execFile("tesseract", [files[i], "stdout", "-l", lang], (err2, stdout) => {
-          if (err2) return reject(err2);
-          text += stdout + "\n";
-          runNext(i + 1);
-        });
-      };
-      runNext(0);
+    execFile("pdftoppm", ["-png", "-r", String(dpi), filePath, prefix], async (err) => {
+      if (err) {
+        cleanup();
+        return reject(err);
+      }
+      try {
+        let names = fs.readdirSync(tmpDir).filter((f) => f.endsWith(".png"));
+        names = sortPngPageFiles(names);
+        if (names.length > maxPages) {
+          console.warn(`[OCR] PDF con ${names.length} páginas; OCR solo en las primeras ${maxPages} (OCR_MAX_PAGES)`);
+          names = names.slice(0, maxPages);
+        }
+        const files = names.map((f) => path.join(tmpDir, f));
+        let text = "";
+        for (let i = 0; i < files.length; i += concurrency) {
+          const batch = files.slice(i, i + concurrency);
+          const parts = await Promise.all(batch.map((f) => execTesseract(f)));
+          text += parts.join("\n") + "\n";
+        }
+        cleanup();
+        resolve(text);
+      } catch (e) {
+        cleanup();
+        reject(e);
+      }
     });
   });
 }
