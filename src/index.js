@@ -2022,7 +2022,8 @@ async function importMedsFromPdf(
     if (typeof onProgress !== "function") return;
     const elapsed = Date.now() - startTime;
     let etaSeconds = null;
-    if (pct > 2 && pct < 100) {
+    // Durante OCR el % sube lento; la ETA lineal se dispara (ej. 500+ s) y confunde.
+    if (!String(phase || "").includes("OCR") && pct > 2 && pct < 100) {
       const estimatedTotalMs = (elapsed / pct) * 100;
       etaSeconds = Math.max(0, Math.round((estimatedTotalMs - elapsed) / 1000));
     }
@@ -2042,9 +2043,13 @@ async function importMedsFromPdf(
   let text = pdf.text;
   let ocrUsed = false;
   console.log(`[IMPORT PDF] pdf-parse text length: ${(text || "").length}`);
-  emit(12, "Texto del PDF extraído", `${(text || "").trim().length} caracteres`);
-  // Auto-fallback to OCR if pdf-parse gets little/no text
-  if (useOcr || !text || text.trim().length < 50) {
+  const trimmedPdfText = (text || "").trim();
+  emit(12, "Texto del PDF extraído", `${trimmedPdfText.length} caracteres`);
+  const minTextChars = Math.max(20, parseInt(process.env.PDF_MIN_TEXT_CHARS || "50", 10) || 50);
+  const textTooShort = trimmedPdfText.length < minTextChars;
+
+  // Solo OCR si el usuario lo pidió. Antes se hacía OCR automático con poco texto → siempre lento en escaneos.
+  if (useOcr) {
     let ocrHeartbeat = null;
     try {
       emit(16, "OCR en curso", "Puede tardar varios minutos en PDFs escaneados");
@@ -2088,8 +2093,14 @@ async function importMedsFromPdf(
     } finally {
       if (ocrHeartbeat) clearInterval(ocrHeartbeat);
     }
+  } else if (textTooShort) {
+    throw new Error(
+      "Este PDF casi no tiene texto legible (suele ser una receta escaneada o una imagen). " +
+        "Marca «Modo OCR» e importa de nuevo, o usa un PDF con texto seleccionable. " +
+        `Solo se leyeron ${trimmedPdfText.length} caracteres (se necesitan al menos ${minTextChars}).`
+    );
   } else {
-    emit(32, "OCR no necesario");
+    emit(32, "OCR no necesario — texto del PDF suficiente");
   }
   const rawText = (text || "").slice(0, 2000);
   emit(40, "Validando paciente en el documento");
@@ -10581,7 +10592,7 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
               </select>
             </div>
             <div>
-              <label>Modo OCR (solo si la receta es escaneo/foto en PDF; si tiene texto, déjalo desmarcado — va más rápido)</label>
+              <label><strong>Modo OCR</strong> — marcar solo para recetas escaneadas/imagen; si el PDF tiene texto, déjalo sin marcar (segundos, no minutos)</label>
               <input name="use_ocr" type="checkbox" value="1" />
             </div>
             <div>
