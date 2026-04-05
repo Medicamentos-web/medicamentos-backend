@@ -1644,6 +1644,15 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+/** Solo rutas internas /admin/... (evita open redirect en return_to). */
+function safeAdminReturnPath(p) {
+  if (!p || typeof p !== "string") return null;
+  const t = p.trim();
+  if (!t.startsWith("/admin/")) return null;
+  if (t.includes("//")) return null;
+  return t.split("?")[0];
+}
+
 function renderShell(req, title, active, content) {
   // Si no hay sesión, renderizar layout mínimo (solo login)
   if (!req.user) {
@@ -3976,15 +3985,52 @@ app.get("/admin/user-edit/:id", requireRoleHtml(["admin", "superuser"]), async (
   }
   const user = result.rows[0];
   const userFamilyId = user.family_id || familyId;
+  let familyBilling = null;
+  if (isAdmin) {
+    const famRes = await pool.query(
+      `SELECT id, name, subscription_status, trial_ends_at FROM families WHERE id = $1`,
+      [userFamilyId]
+    );
+    familyBilling = famRes.rows[0] || null;
+  }
+  const userMsg = typeof req.query.msg === "string" ? req.query.msg : "";
   const doctorResult = await pool.query(
     `SELECT * FROM doctors WHERE family_id = $1 AND user_id = $2`,
     [userFamilyId, id]
   );
   const doctor = doctorResult.rows[0] || {};
   const fieldClass = 'class="form-control"';
+  const fmtTrial = (d) =>
+    d ? new Date(d).toLocaleString("es-ES", { timeZone: "Europe/Zurich" }) : "—";
   const content = `
     <div class="card" style="max-width:640px; margin:0 auto;">
       <h1>Editar usuario</h1>
+      ${userMsg ? `<div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:12px; padding:12px; margin-bottom:16px;"><p style="font-size:13px; color:#065f46; margin:0;">${escapeHtml(userMsg)}</p></div>` : ""}
+      ${isAdmin && familyBilling
+        ? `<div style="background:#f0f9ff; border:1px solid #7dd3fc; border-radius:12px; padding:14px; margin-bottom:16px;">
+            <h2 style="margin:0 0 8px 0; font-size:15px;">Facturación de la familia</h2>
+            <p style="font-size:12px; color:#0c4a6e; margin:0 0 6px 0;">Familia <strong>#${familyBilling.id}</strong> · ${escapeHtml(familyBilling.name || "Sin nombre")}</p>
+            <p style="font-size:12px; color:#0c4a6e; margin:0 0 10px 0;">Estado: <strong>${escapeHtml(familyBilling.subscription_status)}</strong>
+              · Fin de prueba: ${fmtTrial(familyBilling.trial_ends_at)}</p>
+            ${
+              familyBilling.subscription_status !== "active"
+                ? `<form method="POST" action="/admin/billing/extend-trial/${familyBilling.id}" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0;">
+                    <input type="hidden" name="return_to" value="/admin/user-edit/${user.id}" />
+                    <label style="font-size:12px; color:#0369a1;">Días</label>
+                    <select name="days" class="form-control" style="width:auto; min-width:90px;">
+                      <option value="7">7</option>
+                      <option value="14">14</option>
+                      <option value="30" selected>30</option>
+                      <option value="60">60</option>
+                      <option value="90">90</option>
+                    </select>
+                    <button type="submit" class="btn primary" style="margin:0;">⏱ Prorrogar prueba</button>
+                  </form>
+                  <p style="font-size:11px; color:#64748b; margin:10px 0 0 0;">Amplía la fecha de fin de prueba sin borrar medicamentos ni datos.</p>`
+                : `<p style="font-size:12px; color:#059669; margin:0;">Suscripción activa (Stripe). La prueba no aplica.</p>`
+            }
+          </div>`
+        : ""}
       ${user.disclaimer_accepted_at
         ? `<div style="background:#ECFDF5; border:1px solid #6EE7B7; border-radius:12px; padding:12px; margin-bottom:16px;">
             <p style="font-size:13px; color:#065F46; margin:0;">
@@ -6037,6 +6083,35 @@ app.post("/admin/billing/sync/:familyId", requireRoleHtml(["admin"]), async (req
   }
 });
 
+// Admin: prorrogar período de prueba (solo DB; no borra datos ni usuarios)
+app.post("/admin/billing/extend-trial/:familyId", requireRoleHtml(["admin"]), async (req, res) => {
+  const familyId = Number(req.params.familyId);
+  const rawDays = req.body?.days;
+  const days = Math.min(365, Math.max(1, parseInt(String(rawDays), 10) || 30));
+  const returnTo = safeAdminReturnPath(req.body?.return_to);
+  try {
+    const fam = await pool.query(`SELECT subscription_status FROM families WHERE id = $1`, [familyId]);
+    if (!fam.rows.length) {
+      const m = "Familia no encontrada.";
+      return res.redirect(returnTo ? `${returnTo}?msg=${encodeURIComponent(m)}` : `/admin/billing?msg=${encodeURIComponent(m)}`);
+    }
+    if (fam.rows[0].subscription_status === "active") {
+      const m = `La familia ${familyId} tiene suscripción activa; no se prorroga la prueba.`;
+      return res.redirect(returnTo ? `${returnTo}?msg=${encodeURIComponent(m)}` : `/admin/billing?msg=${encodeURIComponent(m)}`);
+    }
+    await pool.query(
+      `UPDATE families SET subscription_status = 'trial', trial_ends_at = NOW() + ($1 * INTERVAL '1 day') WHERE id = $2`,
+      [days, familyId]
+    );
+    console.log(`[ADMIN] Prueba prorrogada ${days} días familia ${familyId}`);
+    const ok = `Prueba prorrogada ${days} días (familia ${familyId}).`;
+    return res.redirect(returnTo ? `${returnTo}?msg=${encodeURIComponent(ok)}` : `/admin/billing?msg=${encodeURIComponent(ok)}`);
+  } catch (err) {
+    console.error("[ADMIN EXTEND TRIAL]", err.message);
+    return res.redirect(`/admin/billing?msg=${encodeURIComponent(err.message)}`);
+  }
+});
+
 // Admin: ver billing de todas las familias
 app.get("/admin/billing", requireRoleHtml(["admin"]), async (req, res) => {
   try {
@@ -6117,7 +6192,19 @@ app.get("/admin/billing", requireRoleHtml(["admin"]), async (req, res) => {
                   <td>${f.user_count}</td>
                   <td>${f.med_count}${f.max_medicines ? `/${f.max_medicines}` : ""}</td>
                   <td style="font-size:10px; word-break:break-all;">${f.stripe_customer_id ? `<a href="https://dashboard.stripe.com/test/customers/${f.stripe_customer_id}" target="_blank" style="color:#2563eb;">${escapeHtml(f.stripe_customer_id.slice(0, 18))}…</a>` : "-"}</td>
-                  <td>${f.stripe_customer_id ? `<form method="POST" action="/admin/billing/sync/${f.id}" style="margin:0;"><button type="submit" style="font-size:11px; background:#2563eb; color:white; border:none; padding:4px 10px; border-radius:6px; cursor:pointer;">🔄 Sync</button></form>` : "-"}</td>
+                  <td>
+                    <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-start;">
+                      ${f.subscription_status !== "active"
+                        ? `<form method="POST" action="/admin/billing/extend-trial/${f.id}" style="margin:0;">
+                            <input type="hidden" name="days" value="30" />
+                            <button type="submit" title="Añade 30 días a la prueba (no borra datos)" style="font-size:11px; background:#059669; color:white; border:none; padding:4px 10px; border-radius:6px; cursor:pointer;">⏱ +30 días</button>
+                          </form>`
+                        : ""}
+                      ${f.stripe_customer_id
+                        ? `<form method="POST" action="/admin/billing/sync/${f.id}" style="margin:0;"><button type="submit" style="font-size:11px; background:#2563eb; color:white; border:none; padding:4px 10px; border-radius:6px; cursor:pointer;">🔄 Sync</button></form>`
+                        : f.subscription_status === "active" ? "—" : ""}
+                    </div>
+                  </td>
                 </tr>`;
               }).join("")}
             </tbody>
