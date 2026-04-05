@@ -487,10 +487,22 @@ const upload = multer({ dest: uploadDir });
 
 /** Estado de importaciones PDF en curso (progreso para la UI). */
 const importPdfJobs = new Map();
+
+function setImportPdfJob(jobId, patch) {
+  const cur = importPdfJobs.get(jobId) || {};
+  importPdfJobs.set(jobId, {
+    ...cur,
+    ...patch,
+    lastActivityAt: Date.now(),
+  });
+}
+
 setInterval(() => {
   const now = Date.now();
+  const maxIdle = 45 * 60 * 1000;
   for (const [id, j] of importPdfJobs.entries()) {
-    if (now - (j.createdAt || 0) > 20 * 60 * 1000) importPdfJobs.delete(id);
+    const last = j.lastActivityAt || j.createdAt || 0;
+    if (now - last > maxIdle) importPdfJobs.delete(id);
   }
 }, 5 * 60 * 1000);
 
@@ -1963,8 +1975,21 @@ async function importMedsFromPdf(
   emit(12, "Texto del PDF extraído", `${(text || "").trim().length} caracteres`);
   // Auto-fallback to OCR if pdf-parse gets little/no text
   if (useOcr || !text || text.trim().length < 50) {
+    let ocrHeartbeat = null;
     try {
-      emit(16, "OCR en curso", "Puede tardar 1–3 minutos en PDFs escaneados");
+      emit(16, "OCR en curso", "Puede tardar varios minutos en PDFs escaneados");
+      const ocrStart = Date.now();
+      ocrHeartbeat = setInterval(() => {
+        const sec = Math.round((Date.now() - ocrStart) / 1000);
+        const pseudo = Math.min(37, 16 + Math.floor(sec / 5));
+        emit(
+          pseudo,
+          "OCR en curso",
+          sec < 90
+            ? `Procesando páginas… ${sec}s (sigue activo)`
+            : `Llevamos ${Math.floor(sec / 60)} min — PDFs grandes pueden tardar mucho; no cierres la pestaña`
+        );
+      }, 2500);
       text = await runOcrOnPdf(filePath, "deu+eng");
       ocrUsed = true;
       console.log(`[IMPORT PDF] OCR text length: ${(text || "").length}`);
@@ -1974,6 +1999,8 @@ async function importMedsFromPdf(
       if (!text || text.trim().length < 10) {
         throw new Error("No se pudo extraer texto del PDF. OCR falló: " + ocrErr.message);
       }
+    } finally {
+      if (ocrHeartbeat) clearInterval(ocrHeartbeat);
     }
   } else {
     emit(32, "OCR no necesario");
@@ -2143,7 +2170,7 @@ app.post(
       return res.status(400).json({ error: "Paciente no válido para tu cuenta" });
     }
     const jobId = crypto.randomBytes(16).toString("hex");
-    importPdfJobs.set(jobId, {
+    setImportPdfJob(jobId, {
       userId: String(req.user.sub),
       createdAt: Date.now(),
       percent: 0,
@@ -2160,9 +2187,7 @@ app.post(
     (async () => {
       try {
         const onProgress = (ev) => {
-          const cur = importPdfJobs.get(jobId) || {};
-          importPdfJobs.set(jobId, {
-            ...cur,
+          setImportPdfJob(jobId, {
             percent: ev.percent,
             phase: ev.phase,
             detail: ev.detail,
@@ -2178,8 +2203,7 @@ app.post(
           skipNameCheck,
           onProgress
         );
-        importPdfJobs.set(jobId, {
-          ...importPdfJobs.get(jobId),
+        setImportPdfJob(jobId, {
           percent: 100,
           phase: "Completado",
           detail: "",
@@ -2189,8 +2213,7 @@ app.post(
           result,
         });
       } catch (err) {
-        importPdfJobs.set(jobId, {
-          ...importPdfJobs.get(jobId),
+        setImportPdfJob(jobId, {
           done: true,
           success: false,
           error: err.message || String(err),
@@ -10492,6 +10515,7 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
           </div>
           <p id="importPdfPhase" class="imp-meta" style="font-weight:600; color:#334155;"></p>
           <p id="importPdfDetail" class="imp-meta" style="font-size:11px; word-break:break-word;"></p>
+          <p class="imp-meta" style="margin-top:10px; font-style:italic;">En <strong>OCR</strong> la barra puede tardar varios minutos; el contador de segundos confirma que sigue procesando.</p>
         </div>
         <div id="importPdfResult"></div>
         <script>
@@ -10523,7 +10547,8 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
               .then(function(r){ if (!r.ok) return r.json().then(function(j){ throw new Error(j.error || "Error"); }); return r.json(); })
               .then(function(data){
                 if (!data.jobId) throw new Error("Sin jobId");
-                var poll = setInterval(function(){
+                var pollTimer = null;
+                function pollOnce() {
                   fetch("/api/admin/import-pdf/status/" + encodeURIComponent(data.jobId), { credentials: "same-origin" })
                     .then(function(r){
                       if (!r.ok) return r.json().then(function(j){ throw new Error(j.error || "No se pudo leer el estado"); });
@@ -10539,7 +10564,7 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
                         etaEl.textContent = "Tiempo restante estimado: ~" + st.etaSeconds + " s";
                       } else if (st.done) { etaEl.textContent = ""; }
                       if (st.done) {
-                        clearInterval(poll);
+                        if (pollTimer) clearInterval(pollTimer);
                         progress.style.display = "none";
                         btn.disabled = false;
                         if (st.success && st.result) {
@@ -10558,12 +10583,14 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
                       }
                     })
                     .catch(function(err){
-                      clearInterval(poll);
+                      if (pollTimer) clearInterval(pollTimer);
                       btn.disabled = false;
                       progress.style.display = "none";
                       resultEl.innerHTML = '<div class="imp-result-err"><p>' + (err && err.message ? err.message : "Error de red") + '</p></div>';
                     });
-                }, 400);
+                }
+                pollOnce();
+                pollTimer = setInterval(pollOnce, 400);
               })
               .catch(function(err){
                 progress.style.display = "none";
