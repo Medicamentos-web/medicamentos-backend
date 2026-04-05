@@ -1981,16 +1981,32 @@ async function importMedsFromPdf(
       const ocrStart = Date.now();
       ocrHeartbeat = setInterval(() => {
         const sec = Math.round((Date.now() - ocrStart) / 1000);
-        const pseudo = Math.min(37, 16 + Math.floor(sec / 5));
+        // Progreso asintótico 16→36 (nunca se queda fijo en un solo % durante minutos)
+        const t = 1 - 1 / (1 + sec / 200);
+        const pseudo = Math.min(36, 16 + Math.round(20 * t));
+        const mm = Math.floor(sec / 60);
+        const ss = sec % 60;
         emit(
           pseudo,
           "OCR en curso",
-          sec < 90
-            ? `Procesando páginas… ${sec}s (sigue activo)`
-            : `Llevamos ${Math.floor(sec / 60)} min — PDFs grandes pueden tardar mucho; no cierres la pestaña`
+          mm < 1
+            ? `Procesando páginas… ${sec}s · el % sube lentamente (normal en OCR)`
+            : `Llevamos ${mm} min ${ss}s — sigue en curso; no cierres la pestaña`
         );
       }, 2500);
-      text = await runOcrOnPdf(filePath, "deu+eng");
+      const OCR_MAX_MS = 28 * 60 * 1000;
+      let ocrTimeoutId;
+      const ocrTimeoutPromise = new Promise((_, rej) => {
+        ocrTimeoutId = setTimeout(
+          () => rej(new Error("OCR superó el tiempo máximo (28 min). Prueba un PDF más pequeño o sin OCR.")),
+          OCR_MAX_MS
+        );
+      });
+      try {
+        text = await Promise.race([runOcrOnPdf(filePath, "deu+eng"), ocrTimeoutPromise]);
+      } finally {
+        if (ocrTimeoutId) clearTimeout(ocrTimeoutId);
+      }
       ocrUsed = true;
       console.log(`[IMPORT PDF] OCR text length: ${(text || "").length}`);
       emit(38, "OCR completado", `${(text || "").length} caracteres`);
@@ -10515,7 +10531,7 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
           </div>
           <p id="importPdfPhase" class="imp-meta" style="font-weight:600; color:#334155;"></p>
           <p id="importPdfDetail" class="imp-meta" style="font-size:11px; word-break:break-word;"></p>
-          <p class="imp-meta" style="margin-top:10px; font-style:italic;">En <strong>OCR</strong> la barra puede tardar varios minutos; el contador de segundos confirma que sigue procesando.</p>
+          <p class="imp-meta" style="margin-top:10px; font-style:italic;">En <strong>OCR</strong> el porcentaje sube <em>lentamente</em> (no se queda fijo); el texto debajo muestra el tiempo transcurrido.</p>
         </div>
         <div id="importPdfResult"></div>
         <script>
