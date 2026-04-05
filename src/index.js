@@ -3044,78 +3044,79 @@ app.get("/admin/logout", (req, res) => {
 
 app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) => {
   try {
-  const familyId = req.user.family_id;
-  console.log("[DASHBOARD] Cargando para family:", familyId, "user:", req.user.sub);
+  const sessionFamilyId = req.user.family_id;
+  const isAdmin = req.user.role === "admin";
   const usersList = await pool.query(
-    `SELECT id, name, email FROM users WHERE family_id = $1 ORDER BY name ASC`,
-    [familyId]
+    isAdmin
+      ? `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+         FROM users u
+         LEFT JOIN families f ON f.id = u.family_id
+         ORDER BY f.name ASC NULLS LAST, u.name ASC`
+      : `SELECT u.id, u.name, u.email, u.family_id, f.name AS family_name
+         FROM users u
+         LEFT JOIN families f ON f.id = u.family_id
+         WHERE u.family_id = $1
+         ORDER BY u.name ASC`,
+    isAdmin ? [] : [sessionFamilyId]
   );
-  const selectedUserId = Number(req.query?.user_id || req.user.sub);
-  const safeUserId = Number.isFinite(selectedUserId)
-    ? selectedUserId
-    : usersList.rows[0]?.id;
-  console.log("[DASHBOARD] safeUserId:", safeUserId);
-  const [
-    usersCount,
-    medsCount,
-    schedulesCount,
-    lastUsers,
-    lastMeds,
-    alertsCount,
-    alertsList,
-    lowStockList,
-  ] = await Promise.all([
-      pool.query("SELECT COUNT(*) FROM users WHERE family_id = $1", [familyId]),
-      pool.query("SELECT COUNT(*) FROM medicines WHERE family_id = $1 AND user_id = $2", [
-        familyId,
-        safeUserId,
-      ]),
-      pool.query(
-        `SELECT COUNT(*) FROM schedules s
-         JOIN medicines m ON m.id = s.medicine_id
-         JOIN users u ON u.id = s.user_id
-         WHERE m.family_id = $1 AND u.family_id = $1 AND s.user_id = $2`,
-        [familyId, safeUserId]
-      ),
-      pool.query(
-        `SELECT id, name, email, role, created_at
-         FROM users
-         WHERE family_id = $1
-         ORDER BY created_at DESC
-         LIMIT 5`,
-        [familyId]
-      ),
-      pool.query(
-        `SELECT id, name, dosage, current_stock, expiration_date, created_at
-         FROM medicines
-         WHERE family_id = $1 AND user_id = $2
-         ORDER BY created_at DESC
-         LIMIT 5`,
-        [familyId, safeUserId]
-      ),
-      pool.query(
-        `SELECT COUNT(*) FROM alerts
+  const pickSafeUserId = () => {
+    const q = Number(req.query?.user_id || 0);
+    if (Number.isFinite(q) && q > 0 && usersList.rows.some((u) => Number(u.id) === q)) return q;
+    const selfId = Number(req.user.sub);
+    if (usersList.rows.some((u) => Number(u.id) === selfId)) return selfId;
+    return usersList.rows[0]?.id;
+  };
+  const safeUserId = pickSafeUserId();
+
+  let effectiveFamilyId = sessionFamilyId;
+  if (isAdmin && safeUserId) {
+    const fr = await pool.query(`SELECT family_id FROM users WHERE id = $1`, [safeUserId]);
+    effectiveFamilyId = fr.rows[0]?.family_id ?? sessionFamilyId;
+  } else if (!isAdmin) {
+    effectiveFamilyId = sessionFamilyId;
+  }
+
+  const uidForMeds = Number.isFinite(Number(safeUserId)) ? Number(safeUserId) : 0;
+
+  console.log(
+    "[DASHBOARD] family:",
+    effectiveFamilyId,
+    "user:",
+    req.user.sub,
+    "paciente:",
+    uidForMeds,
+    "admin:",
+    isAdmin
+  );
+
+  const [usersCount, medsCount, alertsCount, alertsList, lowStockList] = await Promise.all([
+    pool.query("SELECT COUNT(*) FROM users WHERE family_id = $1", [effectiveFamilyId]),
+    pool.query("SELECT COUNT(*) FROM medicines WHERE family_id = $1 AND user_id = $2", [
+      effectiveFamilyId,
+      uidForMeds,
+    ]),
+    pool.query(
+      `SELECT COUNT(*) FROM alerts
          WHERE family_id = $1 AND read_at IS NULL`,
-        [familyId]
-      ),
-      pool.query(
-        `SELECT type, level, message, created_at, med_name, med_dosage, dose_time, alert_date
+      [effectiveFamilyId]
+    ),
+    pool.query(
+      `SELECT type, level, message, created_at, med_name, med_dosage, dose_time, alert_date
          FROM alerts
          WHERE family_id = $1
          ORDER BY created_at DESC
          LIMIT 6`,
-        [familyId]
-      ),
-      pool.query(
-        `SELECT name, dosage, current_stock
+      [effectiveFamilyId]
+    ),
+    pool.query(
+      `SELECT name, dosage, current_stock
          FROM medicines
          WHERE family_id = $1 AND user_id = $2 AND current_stock <= 10
          ORDER BY current_stock ASC
          LIMIT 6`,
-        [familyId, safeUserId]
-      ),
-    ]);
-  console.log("[DASHBOARD] Queries OK");
+      [effectiveFamilyId, uidForMeds]
+    ),
+  ]);
 
   const content = `
     <style>
@@ -3154,18 +3155,27 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
     </style>
     <div class="card context">
       <div class="left">
-        <label>Paciente activo</label>
+        <label>Paciente activo${isAdmin ? " (todas las familias)" : ""}</label>
+        ${
+          isAdmin
+            ? `<p style="font-size:11px; color:var(--muted); margin:4px 0 6px;">Las cifras y alertas corresponden a la <strong>familia del paciente</strong> elegido.</p>`
+            : ""
+        }
         <form method="GET" action="/dashboard" id="patientForm">
           <select name="user_id" onchange="document.getElementById('patientForm').submit()">
             ${
               usersList.rows.length
                 ? usersList.rows
-                    .map(
-                      (u) =>
-                        `<option value="${u.id}" ${
-                          u.id === safeUserId ? "selected" : ""
-                        }>${escapeHtml(u.name)} · ${escapeHtml(u.email)}</option>`
-                    )
+                    .map((u) => {
+                      const prefix = isAdmin
+                        ? `${escapeHtml((u.family_name || "").trim() || `Familia ${u.family_id}`)} · `
+                        : "";
+                      const sel =
+                        Number(u.id) === Number(safeUserId) ? "selected" : "";
+                      return `<option value="${u.id}" ${sel}>${prefix}${escapeHtml(
+                        u.name || ""
+                      )} · ${escapeHtml(u.email)}</option>`;
+                    })
                     .join("")
                 : `<option value="">Sin usuarios</option>`
             }
@@ -3178,7 +3188,7 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
         <span class="chip-lite">Usuarios ${usersCount.rows[0].count}</span>
       </div>
       <div style="display:flex; gap:10px; align-items:center;">
-        <a class="btn primary" href="/admin/user-edit/${safeUserId}">Ver ficha</a>
+        <a class="btn primary" href="/admin/user-edit/${safeUserId || req.user.sub}">Ver ficha</a>
         <details class="menu">
           <summary class="btn outline">Acciones ▾</summary>
           <div class="menu-panel">
@@ -3213,7 +3223,7 @@ app.get("/dashboard", requireRoleHtml(["admin", "superuser"]), async (req, res) 
       <div class="card kpi">
         <div class="title">Usuarios activos</div>
         <div class="value">${usersCount.rows[0].count}</div>
-        <div class="meta">Familia ${familyId}</div>
+        <div class="meta">Familia ${effectiveFamilyId}${isAdmin ? " (contexto)" : ""}</div>
         <a class="action" href="/admin/reminders/run">Recordatorio semanal</a>
       </div>
     </div>
