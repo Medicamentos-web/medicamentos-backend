@@ -3346,6 +3346,18 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     rows = rows.filter((u) => String(u.family_id) === familyFilter);
   }
   rows.sort((a, b) => (a.name || "").localeCompare(b.name || "", "es", { sensitivity: "base" }));
+  const totalInDb = users.rows.length;
+  const hasFilters = Boolean(q || roleFilter || familyFilter);
+  const scopeBanner = isAdmin
+    ? `<div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:13px; color:#1e3a5f;">
+        <strong>Vista global (administrador):</strong> aquí aparecen <em>todos</em> los usuarios registrados en la base de datos.
+        ${hasFilters ? ` Mostrando <strong>${rows.length}</strong> tras filtros (de ${totalInDb} en listado completo).` : ` Total: <strong>${totalInDb}</strong> usuario(s).`}
+        Si falta alguien, comprueba que no tengas un filtro de rol, familia o búsqueda activo — usa <a href="/admin/users" style="color:#2563eb; font-weight:600;">Limpiar filtros</a>.
+      </div>`
+    : `<div style="background:#fffbeb; border:1px solid #fcd34d; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:13px; color:#78350f;">
+        <strong>Vista de familia:</strong> tu cuenta no es administrador global, solo ves usuarios de <strong>tu familia</strong> (${totalInDb} en tu cuenta).
+        Para ver o gestionar <em>todos</em> los registrados del sistema, inicia sesión con un usuario <strong>admin</strong>.
+      </div>`;
   const msgHtml = msg === "deleted"
     ? '<div style="background:#dcfce7; border:1px solid #22c55e; border-radius:12px; padding:12px; margin-bottom:16px; color:#166534;">✓ Usuario eliminado correctamente.</div>'
     : msg === "resend_ok" || msg === "force_pw_ok"
@@ -3412,6 +3424,7 @@ app.get("/admin/users", requireRoleHtml(["admin", "superuser"]), async (req, res
     </style>
     <div class="card users-page">
       ${msgHtml}
+      ${scopeBanner}
       <header class="users-page-header">
         <h1 class="users-page-title">👤 Pacientes y usuarios</h1>
         <div class="users-page-actions">
