@@ -10828,6 +10828,24 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
         <div id="importPdfResult"></div>
         <script>
         (function(){
+          function readJsonResponse(r) {
+            return r.text().then(function(text) {
+              var j = null;
+              try {
+                j = JSON.parse(text);
+              } catch (e) {
+                var t = (text || "").trim();
+                if (t.charAt(0) === "<") {
+                  throw new Error(
+                    "El servidor devolvió una página HTML (sesión caducada, error o URL incorrecta). Recarga la página e inicia sesión otra vez en admin."
+                  );
+                }
+                throw new Error("Respuesta no válida del servidor (no es JSON).");
+              }
+              if (!r.ok) throw new Error((j && j.error) || ("Error HTTP " + r.status));
+              return j;
+            });
+          }
           var form = document.getElementById("importPdfForm");
           if (!form) return;
           form.addEventListener("submit", function(ev){
@@ -10851,17 +10869,14 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
             etaEl.textContent = "";
             phaseEl.textContent = "Iniciando…";
             detailEl.textContent = "";
-            fetch("/api/admin/import-pdf", { method: "POST", body: fd, credentials: "same-origin" })
-              .then(function(r){ if (!r.ok) return r.json().then(function(j){ throw new Error(j.error || "Error"); }); return r.json(); })
+            fetch("/api/admin/import-pdf", { method: "POST", body: fd, credentials: "same-origin", headers: { Accept: "application/json" } })
+              .then(readJsonResponse)
               .then(function(data){
                 if (!data.jobId) throw new Error("Sin jobId");
                 var pollTimer = null;
                 function pollOnce() {
-                  fetch("/api/admin/import-pdf/status/" + encodeURIComponent(data.jobId), { credentials: "same-origin" })
-                    .then(function(r){
-                      if (!r.ok) return r.json().then(function(j){ throw new Error(j.error || "No se pudo leer el estado"); });
-                      return r.json();
-                    })
+                  fetch("/api/admin/import-pdf/status/" + encodeURIComponent(data.jobId), { credentials: "same-origin", headers: { Accept: "application/json" } })
+                    .then(readJsonResponse)
                     .then(function(st){
                       var p = st.percent != null ? st.percent : 0;
                       bar.style.width = Math.min(100, p) + "%";
