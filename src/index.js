@@ -1253,15 +1253,59 @@ async function preparePdfForOcr(inputPath) {
 }
 
 /**
+ * Mejora escaneos borrosos / bajo contraste antes de Tesseract (ImageMagick).
+ * Si `convert` no existe o falla, se usa el PNG original.
+ */
+function enhancePngForWeakScan(inputPath) {
+  const outPath = inputPath.replace(/\.png$/i, "") + ".enh.png";
+  return new Promise((resolve) => {
+    execFile(
+      "convert",
+      [
+        inputPath,
+        "-colorspace",
+        "Gray",
+        "-normalize",
+        "-resize",
+        "180%",
+        "-unsharp",
+        "0x0.75+0.5+0.008",
+        "-strip",
+        outPath,
+      ],
+      { timeout: 120000, maxBuffer: 25 * 1024 * 1024 },
+      (err) => {
+        if (err) {
+          console.warn("[OCR] ImageMagick convert falló, uso PNG original:", err.message);
+          return resolve({ path: inputPath, cleanup: null });
+        }
+        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 50) {
+          return resolve({ path: outPath, cleanup: outPath });
+        }
+        resolve({ path: inputPath, cleanup: null });
+      }
+    );
+  });
+}
+
+/**
  * OCR de PDF (modo turbo por defecto):
  * - pdftoppm: páginas 1..N, 72 DPI, escala de grises (menos datos → más rápido)
  * - tesseract: solo "deu" por defecto (más rápido que deu+eng); OCR_TESSERACT_LANG=deu+eng si hace falta
+ * - opts.enhance: preprocesado ImageMagick para escaneos de mala calidad (más lento, mejor lectura)
  * - concurrencia según CPUs (mín. 3, máx. 8) u OCR_PAGE_CONCURRENCY
  */
-function runOcrOnPdf(filePath, lang = "deu") {
+function runOcrOnPdf(filePath, lang = "deu", opts = {}) {
+  const enhance =
+    opts.enhance === true ||
+    (opts.enhance !== false && process.env.OCR_IMAGE_ENHANCE === "1");
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "med-ocr-"));
   const prefix = path.join(tmpDir, "page");
-  const dpi = Math.min(200, Math.max(72, Number(process.env.OCR_RENDER_DPI || 72)));
+  let dpi = Math.min(200, Math.max(72, Number(process.env.OCR_RENDER_DPI || 72)));
+  if (enhance) {
+    dpi = Math.min(130, dpi + 28);
+    console.log(`[OCR] modo escaneo débil: DPI ${dpi}, preprocesado ImageMagick por página`);
+  }
   const maxPages = parseOcrMaxPages();
   const unlimited = maxPages >= 999;
   const pageSpan = unlimited ? null : maxPages;
@@ -1310,7 +1354,7 @@ function runOcrOnPdf(filePath, lang = "deu") {
 
   if (pageSpan != null) {
     console.log(
-      `[OCR] turbo: páginas 1–${pageSpan}, ${dpi} DPI${useGray ? ", gris" : ", color"}, ${concurrency}× tesseract, lang=${lang}`
+      `[OCR] turbo: páginas 1–${pageSpan}, ${dpi} DPI${useGray ? ", gris" : ", color"}${enhance ? ", mejora imagen" : ""}, ${concurrency}× tesseract, lang=${lang}`
     );
   }
 
@@ -1331,7 +1375,26 @@ function runOcrOnPdf(filePath, lang = "deu") {
         let text = "";
         for (let i = 0; i < files.length; i += concurrency) {
           const batch = files.slice(i, i + concurrency);
-          const parts = await Promise.all(batch.map((f) => execTesseract(f)));
+          const parts = await Promise.all(
+            batch.map(async (f) => {
+              let tPath = f;
+              let tmpEnh = null;
+              if (enhance) {
+                const p = await enhancePngForWeakScan(f);
+                tPath = p.path;
+                tmpEnh = p.cleanup;
+              }
+              try {
+                return await execTesseract(tPath);
+              } finally {
+                if (tmpEnh) {
+                  try {
+                    fs.unlinkSync(tmpEnh);
+                  } catch (_) {}
+                }
+              }
+            })
+          );
           text += parts.join("\n") + "\n";
         }
         cleanup();
@@ -2116,7 +2179,8 @@ async function importMedsFromPdf(
   userId,
   useOcr = false,
   skipNameCheck = false,
-  onProgress = null
+  onProgress = null,
+  enhanceLowQuality = false
 ) {
   const startTime = Date.now();
   const emit = (pct, phase, detail = "") => {
@@ -2160,7 +2224,13 @@ async function importMedsFromPdf(
       ocrPdfCleanup = prep.cleanup;
       const ocrPath = prep.path;
 
-      emit(16, "OCR en curso", "Puede tardar varios minutos en PDFs escaneados");
+      emit(
+        16,
+        "OCR en curso",
+        enhanceLowQuality
+          ? "Escaneo de baja calidad: mejora de imagen activa (más lento, mejor lectura)"
+          : "Puede tardar varios minutos en PDFs escaneados"
+      );
       const ocrStart = Date.now();
       ocrHeartbeat = setInterval(() => {
         const sec = Math.round((Date.now() - ocrStart) / 1000);
@@ -2197,7 +2267,10 @@ async function importMedsFromPdf(
       });
       try {
         const tessLang = process.env.OCR_TESSERACT_LANG || "deu";
-        text = await Promise.race([runOcrOnPdf(ocrPath, tessLang), ocrTimeoutPromise]);
+        text = await Promise.race([
+          runOcrOnPdf(ocrPath, tessLang, { enhance: enhanceLowQuality }),
+          ocrTimeoutPromise,
+        ]);
       } finally {
         if (ocrTimeoutId) clearTimeout(ocrTimeoutId);
         if (ocrPdfCleanup) {
@@ -2389,6 +2462,7 @@ app.post(
     const userId = Number(req.body?.user_id || req.user.sub);
     const useOcr = req.body?.use_ocr === "1";
     const skipNameCheck = req.body?.skip_name_check === "1";
+    const enhanceScan = req.body?.enhance_scan === "1";
     if (!filePath || !Number.isFinite(userId)) {
       return res.status(400).json({ error: "Archivo y paciente son obligatorios" });
     }
@@ -2428,7 +2502,8 @@ app.post(
           userId,
           useOcr,
           skipNameCheck,
-          onProgress
+          onProgress,
+          enhanceScan
         );
         setImportPdfJob(jobId, {
           percent: 100,
@@ -6054,7 +6129,9 @@ app.post("/api/import-meds", requireRole(["admin", "superuser"]), async (req, re
       familyId,
       userId,
       !!use_ocr,
-      skip_name_check === "1"
+      skip_name_check === "1",
+      null,
+      req.body?.enhance_scan === "1"
     );
     res.json({ ok: true, ...result });
   } catch (error) {
@@ -10726,6 +10803,10 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
               <input name="use_ocr" type="checkbox" value="1" />
             </div>
             <div>
+              <label><strong>Baja calidad</strong> — escaneo borroso o muy oscuro (mejora imagen antes del OCR; más lento)</label>
+              <input name="enhance_scan" type="checkbox" value="1" />
+            </div>
+            <div>
               <label>Omitir verificación de nombre</label>
               <input name="skip_name_check" type="checkbox" value="1" />
             </div>
@@ -11074,6 +11155,7 @@ app.post(
   const userId = Number(req.body?.user_id || req.user.sub);
   const useOcr = req.body?.use_ocr === "1";
   const skipNameCheck = req.body?.skip_name_check === "1";
+  const enhanceScan = req.body?.enhance_scan === "1";
   if (!filePath || !userId) {
     return res.redirect("/admin/import");
   }
@@ -11088,7 +11170,9 @@ app.post(
       familyId,
       userId,
       useOcr,
-      skipNameCheck
+      skipNameCheck,
+      null,
+      enhanceScan
     );
     const debugSection = result.inserted === 0 ? `
       <div style="margin-top:16px; background:#fef3c7; border:1px solid #f59e0b; border-radius:14px; padding:16px;">

@@ -38,4 +38,4 @@ services:
         value: "1"
       - key: CORS_EXTRA_ORIGINS
         sync: false
-      # OCR turbo (opcional): OCR_MAX_PAGES, OCR_RENDER_DPI, OCR_TESSERACT_LANG=deu+eng, OCR_GRAYSCALE=0
+      # OCR: OCR_MAX_PAGES, OCR_RENDER_DPI, OCR_TESSERACT_LANG, OCR_IMAGE_ENHANCE=1 (mejora global), OCR_TIMEOUT_MS
