@@ -1159,16 +1159,16 @@ function sortPngPageFiles(names) {
 }
 
 /**
- * Páginas a rasterizar/OCR. Por defecto 6 (recetas suelen ser cortas).
+ * Páginas a rasterizar/OCR. Por defecto 2 (turbo: receta suele estar en 1 hoja; sube OCR_MAX_PAGES si hace falta).
  * Env: OCR_MAX_PAGES=all|0|999 → todo el PDF; número → máximo de páginas.
  */
 function parseOcrMaxPages() {
   const v = process.env.OCR_MAX_PAGES;
-  if (v === undefined || v === "") return 6;
+  if (v === undefined || v === "") return 2;
   const s = String(v).trim().toLowerCase();
   if (s === "0" || s === "all" || s === "999" || s === "full") return 999;
   const n = parseInt(v, 10);
-  return Number.isFinite(n) && n > 0 ? Math.min(999, n) : 6;
+  return Number.isFinite(n) && n > 0 ? Math.min(999, n) : 2;
 }
 
 /**
@@ -1180,8 +1180,8 @@ async function preparePdfForOcr(inputPath) {
   const unlimited = maxPages >= 999;
   const outPath = path.join(os.tmpdir(), `med-ocrprep-${crypto.randomBytes(12).toString("hex")}.pdf`);
   const gsTimeout = Math.max(60_000, Math.min(900_000, parseInt(process.env.OCR_GS_TIMEOUT_MS || "300000", 10) || 300000));
-  let pdfSettings = String(process.env.OCR_GS_PDFSETTINGS || "/ebook").trim();
-  pdfSettings = pdfSettings.replace(/[^a-zA-Z0-9/_-]/g, "") || "ebook";
+  let pdfSettings = String(process.env.OCR_GS_PDFSETTINGS || "/screen").trim();
+  pdfSettings = pdfSettings.replace(/[^a-zA-Z0-9/_-]/g, "") || "screen";
   if (!pdfSettings.startsWith("/")) pdfSettings = "/" + pdfSettings;
 
   const gsArgs = [
@@ -1194,6 +1194,14 @@ async function preparePdfForOcr(inputPath) {
     "-dSAFER",
     `-sOutputFile=${outPath}`,
   ];
+  if (process.env.OCR_GS_FAST_DOWNSAMPLE !== "0") {
+    gsArgs.push(
+      "-dDownsampleColorImages=true",
+      "-dDownsampleGrayImages=true",
+      "-dColorImageResolution=72",
+      "-dGrayImageResolution=72"
+    );
+  }
   if (!unlimited) {
     gsArgs.push("-dFirstPage=1", `-dLastPage=${maxPages}`);
   }
@@ -1245,20 +1253,26 @@ async function preparePdfForOcr(inputPath) {
 }
 
 /**
- * OCR de PDF:
- * - pdftoppm solo páginas 1..N (no rasteriza el PDF entero) → mucho más rápido en documentos largos
- * - ~100 DPI por defecto (env OCR_RENDER_DPI)
- * - tesseract --oem 1 --psm 6; paralelo (OCR_PAGE_CONCURRENCY, default 4)
+ * OCR de PDF (modo turbo por defecto):
+ * - pdftoppm: páginas 1..N, 72 DPI, escala de grises (menos datos → más rápido)
+ * - tesseract: solo "deu" por defecto (más rápido que deu+eng); OCR_TESSERACT_LANG=deu+eng si hace falta
+ * - concurrencia según CPUs (mín. 3, máx. 8) u OCR_PAGE_CONCURRENCY
  */
 function runOcrOnPdf(filePath, lang = "deu") {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "med-ocr-"));
   const prefix = path.join(tmpDir, "page");
-  const dpi = Math.min(200, Math.max(72, Number(process.env.OCR_RENDER_DPI || 100)));
+  const dpi = Math.min(200, Math.max(72, Number(process.env.OCR_RENDER_DPI || 72)));
   const maxPages = parseOcrMaxPages();
   const unlimited = maxPages >= 999;
   const pageSpan = unlimited ? null : maxPages;
-  const concurrency = Math.min(8, Math.max(1, parseInt(process.env.OCR_PAGE_CONCURRENCY || "4", 10)));
+  const cpus = Math.max(1, os.cpus()?.length || 1);
+  const defaultConc = Math.min(8, Math.max(3, cpus * 2));
+  const concurrency = Math.min(
+    12,
+    Math.max(1, parseInt(process.env.OCR_PAGE_CONCURRENCY || String(defaultConc), 10) || defaultConc)
+  );
   const psm = String(process.env.OCR_TESSERACT_PSM || "6").replace(/\D/g, "") || "6";
+  const useGray = process.env.OCR_GRAYSCALE !== "0";
 
   const cleanup = () => {
     try {
@@ -1270,20 +1284,34 @@ function runOcrOnPdf(filePath, lang = "deu") {
     new Promise((res, rej) => {
       execFile(
         "tesseract",
-        [pngPath, "stdout", "-l", lang, "--oem", "1", "--psm", psm],
+        [
+          pngPath,
+          "stdout",
+          "-l",
+          lang,
+          "--oem",
+          "1",
+          "--psm",
+          psm,
+          "-c",
+          `user_defined_dpi=${dpi}`,
+        ],
         { maxBuffer: 15 * 1024 * 1024 },
         (e2, stdout) => (e2 ? rej(e2) : res(stdout || ""))
       );
     });
 
   const pdftoppmArgs = ["-png", "-r", String(dpi)];
+  if (useGray) pdftoppmArgs.push("-gray");
   if (pageSpan != null) {
     pdftoppmArgs.push("-f", "1", "-l", String(pageSpan));
   }
   pdftoppmArgs.push(filePath, prefix);
 
   if (pageSpan != null) {
-    console.log(`[OCR] pdftoppm páginas 1–${pageSpan}, ${dpi} DPI (ajusta OCR_MAX_PAGES o pon all)`);
+    console.log(
+      `[OCR] turbo: páginas 1–${pageSpan}, ${dpi} DPI${useGray ? ", gris" : ", color"}, ${concurrency}× tesseract, lang=${lang}`
+    );
   }
 
   return new Promise((resolve, reject) => {
@@ -2146,12 +2174,14 @@ async function importMedsFromPdf(
           "OCR en curso",
           mm < 1
             ? `Procesando páginas… ${sec}s · el % sube lentamente (normal en OCR)`
-            : `Llevamos ${mm} min ${ss}s — sigue en curso; no cierres la pestaña`
+            : mm >= 25
+              ? `Llevamos ${mm} min ${ss}s — en PDFs pesados puede tardar 45–90 min en el servidor. Si puedes, la próxima vez exporta solo la hoja de la receta.`
+              : `Llevamos ${mm} min ${ss}s — sigue en curso; no cierres la pestaña`
         );
       }, 2500);
       const OCR_MAX_MS = Math.max(
         5 * 60 * 1000,
-        parseInt(process.env.OCR_TIMEOUT_MS || String(45 * 60 * 1000), 10) || 45 * 60 * 1000
+        parseInt(process.env.OCR_TIMEOUT_MS || String(75 * 60 * 1000), 10) || 75 * 60 * 1000
       );
       const ocrTimeoutMin = Math.round(OCR_MAX_MS / 60000);
       const ocrTimeoutPromise = new Promise((_, rej) => {
@@ -2159,14 +2189,15 @@ async function importMedsFromPdf(
           () =>
             rej(
               new Error(
-                `OCR superó el tiempo máximo (${ocrTimeoutMin} min). Prueba un PDF más pequeño, OCR_GS_PDFSETTINGS=/screen en el servidor, u OCR_MAX_PAGES=4.`
+                `OCR superó el tiempo máximo (${ocrTimeoutMin} min). Prueba un PDF de una sola página, OCR_MAX_PAGES=3, o sube OCR_TIMEOUT_MS en el servidor.`
               )
             ),
           OCR_MAX_MS
         );
       });
       try {
-        text = await Promise.race([runOcrOnPdf(ocrPath, "deu+eng"), ocrTimeoutPromise]);
+        const tessLang = process.env.OCR_TESSERACT_LANG || "deu";
+        text = await Promise.race([runOcrOnPdf(ocrPath, tessLang), ocrTimeoutPromise]);
       } finally {
         if (ocrTimeoutId) clearTimeout(ocrTimeoutId);
         if (ocrPdfCleanup) {
@@ -10711,7 +10742,7 @@ app.get("/admin/import", requireRoleHtml(["admin", "superuser"]), async (req, re
           </div>
           <p id="importPdfPhase" class="imp-meta" style="font-weight:600; color:#334155;"></p>
           <p id="importPdfDetail" class="imp-meta" style="font-size:11px; word-break:break-word;"></p>
-          <p class="imp-meta" style="margin-top:10px; font-style:italic;">En <strong>OCR</strong> el porcentaje sube <em>lentamente</em> (no se queda fijo); el texto debajo muestra el tiempo transcurrido.</p>
+          <p class="imp-meta" style="margin-top:10px; font-style:italic;">El servidor usa modo <strong>rápido</strong> (pocas páginas, baja resolución). El % en OCR sube lento; mira el tiempo. Si falla el reconocimiento, en el servidor puedes poner <code>OCR_TESSERACT_LANG=deu+eng</code> o <code>OCR_MAX_PAGES=4</code>. Mejor: PDF con <strong>solo la hoja</strong> de la receta.</p>
         </div>
         <div id="importPdfResult"></div>
         <script>
