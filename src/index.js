@@ -14,6 +14,7 @@ const PDFDocument = require("pdfkit");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const AppleStrategy = require("passport-apple");
@@ -27,6 +28,7 @@ pg.types.setTypeParser(1082, (val) => val);
 const Stripe = require("stripe");
 
 const app = express();
+app.set("trust proxy", 1);
 
 // ── Stripe config ──
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
@@ -275,21 +277,45 @@ if (process.env.CORS_EXTRA_ORIGINS) {
     .forEach((o) => allowedOrigins.push(new RegExp("^" + o.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$")));
 }
 
+const corsStrictInProduction = process.env.NODE_ENV === "production" && process.env.CORS_RELAXED !== "true";
+
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Sin origin = same-origin o herramientas (curl, etc.) → permitir
       if (!origin) return callback(null, true);
       const ok = allowedOrigins.some((regex) => regex.test(origin));
-      if (!ok) console.warn("[CORS] Bloqueado:", origin);
-      // Permitir siempre pero logear los no reconocidos (evita 500 por CORS)
-      return callback(null, true);
+      if (ok) return callback(null, true);
+      if (!corsStrictInProduction) {
+        console.warn("[CORS] Origen no listado permitido (no producción estricta):", origin);
+        return callback(null, true);
+      }
+      console.warn("[CORS] Rechazado:", origin);
+      return callback(null, false);
     },
     credentials: true,
   })
 );
 
+if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+  console.error("[FATAL] JWT_SECRET es obligatorio en producción. Define la variable de entorno y reinicia.");
+  process.exit(1);
+}
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change";
+
+const authLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 12,
+  message: { error: "demasiados intentos de inicio de sesión. Prueba en unos minutos." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const authSensitiveLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 25,
+  message: { error: "demasiadas solicitudes desde esta IP. Prueba más tarde." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 const TOKEN_NAME = "medicamentos_token";
 const DEV_SHOW_RESET_TOKEN = process.env.DEV_SHOW_RESET_TOKEN === "true";
 
@@ -2770,8 +2796,14 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-// Diagnóstico: muestra info del servidor sin consultar DB
+// Diagnóstico: en producción solo con DIAG_SECRET en cabecera x-diag-secret
 app.get("/diag", (req, res) => {
+  if (process.env.NODE_ENV === "production") {
+    const diagSecret = process.env.DIAG_SECRET;
+    if (!diagSecret || String(req.get("x-diag-secret") || "") !== diagSecret) {
+      return res.status(404).json({ error: "not found" });
+    }
+  }
   const emailConfigured = !!mailTransport;
   res.json({
     ok: true,
@@ -2836,7 +2868,7 @@ app.get("/", (_req, res) => {
 // =============================================================================
 // AUTH
 // =============================================================================
-app.post("/auth/register", async (req, res) => {
+app.post("/auth/register", authSensitiveLimiter, async (req, res) => {
   const {
     family_id,
     name,
@@ -2896,7 +2928,7 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
-app.post("/auth/login", async (req, res) => {
+app.post("/auth/login", authLoginLimiter, async (req, res) => {
   const { family_id, email, password } = req.body || {};
   if (!email || !password) {
     return res
@@ -3369,7 +3401,7 @@ app.get("/api/check-email", async (req, res) => {
   }
 });
 
-app.post("/auth/forgot", async (req, res) => {
+app.post("/auth/forgot", authSensitiveLimiter, async (req, res) => {
   const { family_id, email } = req.body || {};
   if (!email) {
     return res.status(400).json({ error: "email es requerido" });
@@ -3411,7 +3443,7 @@ app.post("/auth/forgot", async (req, res) => {
   }
 });
 
-app.post("/auth/reset", async (req, res) => {
+app.post("/auth/reset", authSensitiveLimiter, async (req, res) => {
   const { token, new_password } = req.body || {};
   if (!token || !new_password) {
     return res
