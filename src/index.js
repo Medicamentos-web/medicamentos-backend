@@ -6635,6 +6635,97 @@ app.post("/api/doctor", requireAuth, async (req, res) => {
   }
 });
 
+// =============================================================================
+// CITAS MÉDICAS (CRUD ligero; recordatorios vía generateAppointmentAlerts)
+// =============================================================================
+function medicalAppointmentsFamilyId(req) {
+  const fromQuery = getFamilyId(req);
+  const uid = Number(req.user?.family_id);
+  if (req.user?.role === "superuser" && fromQuery && Number(fromQuery) > 0) {
+    return Number(fromQuery);
+  }
+  return uid > 0 ? uid : null;
+}
+
+app.get("/api/medical-appointments", requireAuth, async (req, res) => {
+  const familyId = medicalAppointmentsFamilyId(req);
+  if (!familyId) {
+    return res.status(400).json({ error: "family_id no válido" });
+  }
+  try {
+    const r = await pool.query(
+      `SELECT id, user_id, title, notes, appointment_at
+       FROM medical_appointments
+       WHERE family_id = $1
+         AND appointment_at >= NOW() - INTERVAL '30 days'
+       ORDER BY appointment_at ASC
+       LIMIT 200`,
+      [familyId]
+    );
+    res.json(r.rows);
+  } catch (e) {
+    console.error("[API medical-appointments GET]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/medical-appointments", requireAuth, async (req, res) => {
+  const familyId = medicalAppointmentsFamilyId(req);
+  const userId = Number(req.user?.sub);
+  if (!familyId || !Number.isFinite(userId)) {
+    return res.status(400).json({ error: "Sesión o familia no válida" });
+  }
+  const { title, notes, appointment_at } = req.body || {};
+  const titleTrim = String(title || "").trim();
+  if (!titleTrim) {
+    return res.status(400).json({ error: "El título es obligatorio" });
+  }
+  const at = new Date(appointment_at || "");
+  if (Number.isNaN(at.getTime())) {
+    return res.status(400).json({ error: "Fecha y hora no válidas" });
+  }
+  if (at.getTime() <= Date.now()) {
+    return res.status(400).json({ error: "La cita debe ser en el futuro" });
+  }
+  try {
+    const ins = await pool.query(
+      `INSERT INTO medical_appointments (family_id, user_id, title, notes, appointment_at)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, user_id, title, notes, appointment_at`,
+      [familyId, userId, titleTrim, String(notes || "").trim() || null, at.toISOString()]
+    );
+    res.status(201).json(ins.rows[0]);
+  } catch (e) {
+    console.error("[API medical-appointments POST]", e.message);
+    res.status(500).json({ error: "No se pudo guardar la cita" });
+  }
+});
+
+app.delete("/api/medical-appointments/:id", requireAuth, async (req, res) => {
+  const familyId = medicalAppointmentsFamilyId(req);
+  const id = Number(req.params.id);
+  if (!familyId || !Number.isFinite(id)) {
+    return res.status(400).json({ error: "Parámetros no válidos" });
+  }
+  try {
+    const r = await pool.query(
+      `DELETE FROM medical_appointments WHERE id = $1 AND family_id = $2 RETURNING id`,
+      [id, familyId]
+    );
+    if (r.rows.length === 0) {
+      return res.status(404).json({ error: "Cita no encontrada" });
+    }
+    await pool.query(
+      `DELETE FROM alerts WHERE type = 'appointment_reminder' AND appointment_id = $1`,
+      [id]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[API medical-appointments DELETE]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Blood pressure
 app.get("/api/blood-pressure", requireAuth, async (req, res) => {
   const familyId = getFamilyId(req);
