@@ -648,6 +648,35 @@ ensureAlertTables().catch((error) => {
   console.error("ERROR: No se pudo crear alerts:", error.message);
 });
 
+async function ensureMedicalAppointmentsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS medical_appointments (
+      id SERIAL PRIMARY KEY,
+      family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title VARCHAR(255) NOT NULL,
+      notes TEXT,
+      appointment_at TIMESTAMPTZ NOT NULL,
+      reminder_sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS idx_medical_appointments_family ON medical_appointments(family_id)"
+  );
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS idx_medical_appointments_user ON medical_appointments(user_id)"
+  );
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS idx_medical_appointments_at ON medical_appointments(appointment_at)"
+  );
+  await pool.query(`ALTER TABLE alerts ADD COLUMN IF NOT EXISTS appointment_id INTEGER`);
+}
+
+ensureMedicalAppointmentsTable().catch((error) => {
+  console.error("ERROR: No se pudo crear medical_appointments:", error.message);
+});
+
 async function ensureAuditTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS medicine_audits (
@@ -938,6 +967,14 @@ async function ensureStockDepleted() {
 }
 ensureStockDepleted().catch((e) => console.error("ERROR stock_depleted:", e.message));
 
+async function ensureMedicineClinicalNotes() {
+  await pool.query(`ALTER TABLE medicines ADD COLUMN IF NOT EXISTS indication_notes TEXT`);
+  await pool.query(`ALTER TABLE medicines ADD COLUMN IF NOT EXISTS side_effects_notes TEXT`);
+}
+ensureMedicineClinicalNotes().catch((e) =>
+  console.error("ERROR medicine clinical notes:", e.message)
+);
+
 async function ensureDoctorTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS doctors (
@@ -1066,6 +1103,8 @@ const PUSH_STRINGS = {
   es: {
     reminder_title: "Recordatorio de medicación",
     reminder_body: (med, time) => `Toma pendiente: ${med} a las ${time}`,
+    appointment_title: "Cita médica",
+    appointment_body: (title, when) => `Pronto: ${title}${when ? ` · ${when}` : ""}`,
     pending_title: "Tomas pendientes",
     pending_body: (n) => `Te faltan ${n} toma(s) hoy.`,
     test_title: "MediControl Test",
@@ -1074,6 +1113,8 @@ const PUSH_STRINGS = {
   "de-CH": {
     reminder_title: "Medikamenten-Erinnerung",
     reminder_body: (med, time) => `Ausstehende Einnahme: ${med} um ${time}`,
+    appointment_title: "Arzttermin",
+    appointment_body: (title, when) => `Bald: ${title}${when ? ` · ${when}` : ""}`,
     pending_title: "Ausstehende Einnahmen",
     pending_body: (n) => `Du hast heute noch ${n} Einnahme(n) ausstehend.`,
     test_title: "MediControl Test",
@@ -1082,6 +1123,8 @@ const PUSH_STRINGS = {
   en: {
     reminder_title: "Medication reminder",
     reminder_body: (med, time) => `Pending dose: ${med} at ${time}`,
+    appointment_title: "Medical appointment",
+    appointment_body: (title, when) => `Coming up: ${title}${when ? ` · ${when}` : ""}`,
     pending_title: "Pending doses",
     pending_body: (n) => `You have ${n} dose(s) remaining today.`,
     test_title: "MediControl Test",
@@ -1094,6 +1137,11 @@ function getPushPayload(type, lang, params = {}) {
   switch (type) {
     case "reminder":
       return { title: l.reminder_title, body: l.reminder_body(params.med || "", params.time || "") };
+    case "appointment":
+      return {
+        title: l.appointment_title,
+        body: l.appointment_body(params.title || "", params.when || params.time || ""),
+      };
     case "pending":
       return { title: l.pending_title, body: l.pending_body(params.count || 0) };
     case "test":
@@ -1567,6 +1615,80 @@ function buildCriticalMedsPdf(
   });
 }
 
+function buildDoctorClinicalSummaryPdf(
+  rows,
+  { title = "Resumen de medicación para el médico", patientName = "Paciente" } = {}
+) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 40 });
+      const chunks = [];
+      doc.on("data", (chunk) => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.fontSize(16).text(title);
+      doc.moveDown(0.3);
+      doc.fontSize(11).text(`Paciente: ${patientName}`);
+      doc.text(`Generado: ${formatDateTime(new Date())}`);
+      doc.moveDown(0.5);
+      doc
+        .fontSize(9)
+        .text(
+          "Documento generado desde MediControl. Incluye lo que el paciente anotó sobre el motivo o síntomas " +
+            "asociados a cada medicamento y posibles efectos secundarios. No sustituye la prescripción ni la historia clínica.",
+          { width: 520 }
+        );
+      doc.moveDown();
+      if (!rows.length) {
+        doc.fontSize(11).text("No hay medicamentos activos en la lista.");
+      } else {
+        rows.forEach((med, idx) => {
+          doc
+            .fontSize(12)
+            .text(`${idx + 1}. ${med.name}${med.dosage ? ` · ${med.dosage}` : ""}`, { width: 520 });
+          doc.fontSize(10);
+          if (med.schedule_summary) {
+            doc.text(`Horarios: ${med.schedule_summary}`, { width: 520 });
+          }
+          doc.text(
+            `Stock: ${med.current_stock ?? "—"} · Caducidad: ${
+              med.expiration_date ? formatDateOnlyDisplay(med.expiration_date) : "—"
+            }`,
+            { width: 520 }
+          );
+          const ind = String(med.indication_notes || "").trim() || "— (no indicado por el paciente)";
+          const fx = String(med.side_effects_notes || "").trim() || "— (no indicado por el paciente)";
+          doc.text(`Motivo / síntomas (paciente): ${ind}`, { width: 520 });
+          doc.text(`Efectos secundarios (paciente): ${fx}`, { width: 520 });
+          doc.moveDown(0.5);
+        });
+      }
+      doc.fontSize(9).text("—\nMediControl", { width: 520 });
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function loadMedicinesRowsForDoctorSummary(familyId, userId) {
+  const r = await pool.query(
+    `SELECT m.name, m.dosage, m.current_stock, m.expiration_date,
+            m.indication_notes, m.side_effects_notes,
+            COALESCE((
+              SELECT string_agg(s.dose_time || ' × ' || s.frequency, ', ' ORDER BY s.dose_time)
+              FROM schedules s
+              WHERE s.medicine_id = m.id AND s.user_id = m.user_id
+            ), '') AS schedule_summary
+     FROM medicines m
+     WHERE m.family_id = $1 AND m.user_id = $2
+       AND COALESCE(m.stock_depleted, FALSE) = FALSE
+       AND (m.end_date IS NULL OR m.end_date >= CURRENT_DATE)
+     ORDER BY m.name ASC`,
+    [familyId, userId]
+  );
+  return r.rows;
+}
+
 const MED_NAME_HINTS = (process.env.MED_NAME_HINTS || "")
   .split(",")
   .map((v) => v.trim().toLowerCase())
@@ -1768,6 +1890,75 @@ async function ensureDefaultScheduleForMedicine({ familyId, userId, medicineId }
      VALUES ($1, $2, $3, $4, $5)`,
     [medicineId, userId, "08:00", "1", "1234567"]
   );
+}
+
+function parseManualBlockFrequency(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) {
+    const n = parseInt(s, 10);
+    return n > 0 ? s : null;
+  }
+  if (/^\d+\/\d+$/.test(s)) {
+    const [a, b] = s.split("/").map((x) => parseInt(x, 10));
+    return a > 0 && b > 0 ? s : null;
+  }
+  return s;
+}
+
+async function replaceSchedulesFromManualBlocks({ userId, medicineId, body }) {
+  const blocks = [
+    ["manual_morning", "08:00"],
+    ["manual_midday", "12:00"],
+    ["manual_afternoon", "16:00"],
+    ["manual_night", "20:00"],
+  ];
+  await pool.query(`DELETE FROM schedules WHERE medicine_id = $1 AND user_id = $2`, [medicineId, userId]);
+  let any = false;
+  for (const [key, doseTime] of blocks) {
+    const freq = parseManualBlockFrequency(body?.[key]);
+    if (freq) {
+      any = true;
+      await pool.query(
+        `INSERT INTO schedules (medicine_id, user_id, dose_time, frequency, days_of_week)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [medicineId, userId, doseTime, freq, "1234567"]
+      );
+    }
+  }
+  if (!any) {
+    await ensureDefaultScheduleForMedicine({ familyId: null, userId, medicineId });
+  }
+}
+
+async function insertAppointmentsFromBody(body, familyId, userId) {
+  const raw = body?.appointments_json;
+  if (raw == null || raw === "") return 0;
+  const str = typeof raw === "string" ? raw : String(raw);
+  let list;
+  try {
+    list = JSON.parse(str);
+  } catch {
+    return 0;
+  }
+  if (!Array.isArray(list)) return 0;
+  const now = Date.now();
+  let inserted = 0;
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const title = String(item.title || item.name || "").trim();
+    const atRaw = item.appointment_at || item.datetime || item.at;
+    if (!title || !atRaw) continue;
+    const at = new Date(atRaw);
+    if (Number.isNaN(at.getTime()) || at.getTime() <= now) continue;
+    await pool.query(
+      `INSERT INTO medical_appointments (family_id, user_id, title, notes, appointment_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [familyId, userId, title, String(item.notes || "").trim() || null, at.toISOString()]
+    );
+    inserted += 1;
+  }
+  return inserted;
 }
 
 function getFamilyId(req) {
@@ -5625,7 +5816,42 @@ app.put("/api/medicines/:id", requireRole(["admin", "superuser", "user"]), async
   }
 });
 
-app.delete("/api/medicines/:id", requireRole(["admin", "superuser"]), async (req, res) => {
+app.patch("/api/medicines/:id/clinical-notes", requireRole(["admin", "superuser", "user"]), async (req, res) => {
+  const familyId = getFamilyId(req);
+  const id = Number(req.params.id);
+  const userId = Number(req.body?.user_id);
+  const indication_notes =
+    req.body?.indication_notes != null ? String(req.body.indication_notes) : "";
+  const side_effects_notes =
+    req.body?.side_effects_notes != null ? String(req.body.side_effects_notes) : "";
+  if (!familyId || !Number.isFinite(id) || !Number.isFinite(userId)) {
+    return res.status(400).json({ error: "family_id, user_id e id son requeridos" });
+  }
+  if (req.user.role === "user" && req.user.sub !== userId) {
+    return res.status(403).json({ error: "sin permisos" });
+  }
+  if (req.user.role === "user" && Number(req.user.family_id) !== Number(familyId)) {
+    return res.status(403).json({ error: "sin permisos" });
+  }
+  try {
+    const result = await pool.query(
+      `UPDATE medicines
+       SET indication_notes = $1,
+           side_effects_notes = $2
+       WHERE id = $3 AND family_id = $4 AND user_id = $5
+       RETURNING id, indication_notes, side_effects_notes`,
+      [indication_notes, side_effects_notes, id, familyId, userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "medicamento no encontrado" });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/medicines/:id", requireRole(["admin", "superuser", "user"]), async (req, res) => {
   const familyId = getFamilyId(req);
   const id = Number(req.params.id);
   const userId = Number(req.query.user_id || req.query.userId || req.body?.user_id);
@@ -5637,6 +5863,14 @@ app.delete("/api/medicines/:id", requireRole(["admin", "superuser"]), async (req
   }
   if (!Number.isFinite(id)) {
     return res.status(400).json({ error: "id inválido" });
+  }
+  if (req.user.role === "user") {
+    if (Number(req.user.family_id) !== Number(familyId)) {
+      return res.status(403).json({ error: "sin permisos" });
+    }
+    if (Number(req.user.sub) !== userId) {
+      return res.status(403).json({ error: "solo puedes eliminar tus propios medicamentos" });
+    }
   }
 
   try {
@@ -5885,6 +6119,8 @@ app.get("/api/meds-by-date", requireAuth, async (req, res) => {
        m.dosage,
        m.current_stock,
        m.expiration_date,
+       m.indication_notes,
+       m.side_effects_notes,
        s.days_of_week,
        dcr.requested_dosage,
        dcr.effective_date,
@@ -5933,9 +6169,107 @@ app.get("/api/meds-by-date", requireAuth, async (req, res) => {
       pending_dose: row.requested_dosage ? true : false,
       requested_dosage: row.requested_dosage || null,
       effective_date: row.effective_date || null,
+      indication_notes: row.indication_notes || "",
+      side_effects_notes: row.side_effects_notes || "",
     }));
 
     res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/doctor-summary/pdf", requireAuth, async (req, res) => {
+  const familyId = getFamilyId(req);
+  const userId = Number(req.query.user_id || req.query.userId || req.user?.sub);
+  if (!familyId || !Number.isFinite(userId)) {
+    return res.status(400).json({ error: "family_id y user_id son requeridos" });
+  }
+  if (req.user.role === "user" && Number(req.user.sub) !== userId) {
+    return res.status(403).json({ error: "sin permisos" });
+  }
+  if (req.user.role === "user" && Number(req.user.family_id) !== Number(familyId)) {
+    return res.status(403).json({ error: "sin permisos" });
+  }
+  try {
+    const userRow = await pool.query(
+      `SELECT name, first_name, last_name FROM users WHERE id = $1 AND family_id = $2`,
+      [userId, familyId]
+    );
+    const patientName = buildUserName(
+      userRow.rows[0]?.name,
+      userRow.rows[0]?.first_name,
+      userRow.rows[0]?.last_name
+    );
+    const meds = await loadMedicinesRowsForDoctorSummary(familyId, userId);
+    const pdfBuffer = await buildDoctorClinicalSummaryPdf(meds, {
+      title: "Resumen de medicación (paciente)",
+      patientName: patientName || "Paciente",
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeFilename(`resumen_medicacion_${userId}`)}.pdf"`
+    );
+    res.send(pdfBuffer);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/doctor-summary/send", requireAuth, async (req, res) => {
+  const familyId = getFamilyId(req);
+  const userId = Number(req.body?.user_id || req.user?.sub);
+  if (!familyId || !Number.isFinite(userId)) {
+    return res.status(400).json({ error: "family_id y user_id son requeridos" });
+  }
+  if (req.user.role === "user" && Number(req.user.sub) !== userId) {
+    return res.status(403).json({ error: "sin permisos" });
+  }
+  if (req.user.role === "user" && Number(req.user.family_id) !== Number(familyId)) {
+    return res.status(403).json({ error: "sin permisos" });
+  }
+  if (!mailTransport) {
+    return res.status(503).json({ error: "envío de correo no disponible" });
+  }
+  try {
+    const docRow = await pool.query(
+      `SELECT email, first_name, last_name FROM doctors WHERE family_id = $1 AND user_id = $2`,
+      [familyId, userId]
+    );
+    const to = String(docRow.rows[0]?.email || "").trim();
+    if (!to) {
+      return res.status(400).json({
+        error: "añade el email del médico en la app (médico de cabecera / SOS)",
+      });
+    }
+    const userRow = await pool.query(
+      `SELECT name, first_name, last_name FROM users WHERE id = $1 AND family_id = $2`,
+      [userId, familyId]
+    );
+    const patientName = buildUserName(
+      userRow.rows[0]?.name,
+      userRow.rows[0]?.first_name,
+      userRow.rows[0]?.last_name
+    );
+    const meds = await loadMedicinesRowsForDoctorSummary(familyId, userId);
+    const pdfBuffer = await buildDoctorClinicalSummaryPdf(meds, {
+      title: "Resumen de medicación (paciente)",
+      patientName: patientName || "Paciente",
+    });
+    const drName = [docRow.rows[0]?.first_name, docRow.rows[0]?.last_name].filter(Boolean).join(" ");
+    await mailTransport.sendMail({
+      from: SMTP_USER,
+      to,
+      subject: `MediControl · Resumen de medicación — ${patientName || "Paciente"}`,
+      html: `<p>Estimado/a Dr./Dra. ${escapeHtml(drName || "")},</p>
+        <p>Adjuntamos el resumen actualizado de medicación de <strong>${escapeHtml(
+          patientName || "Paciente"
+        )}</strong>, incluyendo los motivos o síntomas y efectos secundarios anotados por el paciente en MediControl.</p>
+        <p>Este mensaje fue enviado desde la aplicación MediControl.</p>`,
+      attachments: [{ filename: "resumen_medicacion.pdf", content: pdfBuffer }],
+    });
+    res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -8707,11 +9041,60 @@ async function generateDoseAlerts(familyId) {
   return created;
 }
 
+async function generateAppointmentAlerts(familyId) {
+  const due = await pool.query(
+    `SELECT ma.id, ma.user_id, ma.title, ma.notes, ma.appointment_at
+     FROM medical_appointments ma
+     INNER JOIN users u ON u.id = ma.user_id AND u.family_id = ma.family_id
+     WHERE ma.family_id = $1
+       AND ma.reminder_sent_at IS NULL
+       AND ma.appointment_at > NOW()
+       AND ma.appointment_at <= NOW() + INTERVAL '60 minutes'`,
+    [familyId]
+  );
+  let created = 0;
+  for (const row of due.rows) {
+    const dup = await pool.query(
+      `SELECT 1 FROM alerts WHERE type = 'appointment_reminder' AND appointment_id = $1 LIMIT 1`,
+      [row.id]
+    );
+    if (dup.rows.length > 0) continue;
+
+    const at = row.appointment_at instanceof Date ? row.appointment_at : new Date(row.appointment_at);
+    const dateStr = at.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" });
+    const timeStr = at.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+    const when = `${dateStr} ${timeStr}`;
+    const msg =
+      row.notes && String(row.notes).trim()
+        ? `Cita médica: ${row.title} · ${when} · ${String(row.notes).trim()}`
+        : `Cita médica: ${row.title} · ${when}`;
+    const alertDate = at.toISOString().slice(0, 10);
+
+    await pool.query(
+      `INSERT INTO alerts (family_id, user_id, type, level, message, med_name, dose_time, alert_date, appointment_id)
+       VALUES ($1, $2, 'appointment_reminder', 'info', $3, $4, $5, $6::date, $7)`,
+      [familyId, row.user_id, msg, row.title, timeStr, alertDate, row.id]
+    );
+    const pushSent = await sendPushToUser(row.user_id, {
+      _type: "appointment",
+      title: row.title || "",
+      when,
+    });
+    await pool.query(`UPDATE medical_appointments SET reminder_sent_at = NOW() WHERE id = $1`, [row.id]);
+    console.log(
+      `[ALERTS] Appointment reminder user ${row.user_id}: ${row.title} @ ${when} (push: ${pushSent})`
+    );
+    created += 1;
+  }
+  return created;
+}
+
 // Wrapper compatible con las rutas admin que llaman a generateAlertsForFamily
 async function generateAlertsForFamily(familyId) {
   const s = await generateStockAlerts(familyId);
   const d = await generateDoseAlerts(familyId);
-  return s + d;
+  const a = await generateAppointmentAlerts(familyId);
+  return s + d + a;
 }
 
 async function cleanupOldAlerts() {
@@ -8755,6 +9138,10 @@ async function cleanupOldAlerts() {
   // 5) Migrar tipo viejo stock_low → low_stock para consistencia
   await pool.query(
     `UPDATE alerts SET type = 'low_stock' WHERE type = 'stock_low'`
+  );
+  await pool.query(
+    `DELETE FROM alerts WHERE type = 'appointment_reminder' AND alert_date IS NOT NULL AND alert_date < $1::date`,
+    [today]
   );
 }
 
@@ -8828,6 +9215,7 @@ async function runAlertsJob() {
       }
       // Dosis: cada ejecución (cada 4 horas)
       await generateDoseAlerts(row.id);
+      await generateAppointmentAlerts(row.id);
     }
 
     // Verificar fechas límite de medicamentos (1x al día)
@@ -11315,16 +11703,18 @@ app.post(
           expiryDate: medExpiry || null,
           batchId: null,
         });
-        await ensureDefaultScheduleForMedicine({
-          familyId,
+        await replaceSchedulesFromManualBlocks({
           userId,
           medicineId: medResult.id,
+          body: req.body,
         });
+        const appointmentsSaved = await insertAppointmentsFromBody(req.body, familyId, userId);
         return res.json({
           ok: true,
           action: medResult.action,
           medicine_id: medResult.id,
           extracted: { name: medName, dosage: medDosage, qty: medQty },
+          appointments_saved: appointmentsSaved,
         });
       }
       const userResult = await pool.query(
@@ -11360,6 +11750,7 @@ app.post(
           userId,
           medicineId: medResult.id,
         });
+        const appointmentsSavedOcr = await insertAppointmentsFromBody(req.body, familyId, userId);
         return res.json({
           ok: true,
           action: medResult.action,
@@ -11367,6 +11758,7 @@ app.post(
           extracted: { name: nameCandidate, dosage, qty },
           detected_text: detectedText,
           detected_text_full: text || "",
+          appointments_saved: appointmentsSavedOcr,
         });
       }
       let validatedByBirthDate = false;
@@ -11400,6 +11792,7 @@ app.post(
         medicineId: medResult.id,
       });
 
+      const appointmentsSavedFull = await insertAppointmentsFromBody(req.body, familyId, userId);
       res.json({
         ok: true,
         action: medResult.action,
@@ -11408,6 +11801,7 @@ app.post(
         validated_by_birth_date: validatedByBirthDate,
         detected_text: detectedText,
         detected_text_full: text || "",
+        appointments_saved: appointmentsSavedFull,
       });
     } catch (error) {
       res.status(500).json({ error: error.message });
